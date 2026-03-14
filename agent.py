@@ -6,7 +6,7 @@ Usage:
     uv run agent.py "Your question here"
 
 Output:
-    JSON with "answer", "source", and "tool_calls" fields to stdout.
+    JSON with "answer", "source" (optional), and "tool_calls" fields to stdout.
     All debug output goes to stderr.
 """
 
@@ -15,6 +15,7 @@ import os
 import sys
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -27,19 +28,32 @@ MAX_TOOL_CALLS = 10
 
 
 def load_env():
-    """Load environment variables from .env.agent.secret."""
-    env_path = Path(__file__).parent / ".env.agent.secret"
-    if not env_path.exists():
-        print(f"Error: {env_path} not found", file=sys.stderr)
-        sys.exit(1)
+    """Load environment variables from .env.agent.secret and .env.docker.secret."""
+    # Load .env.agent.secret for LLM config
+    agent_env_path = Path(__file__).parent / ".env.agent.secret"
+    if agent_env_path.exists():
+        load_dotenv(agent_env_path)
+    else:
+        print(f"Warning: {agent_env_path} not found", file=sys.stderr)
 
-    load_dotenv(env_path)
+    # Load .env.docker.secret for LMS API key
+    docker_env_path = Path(__file__).parent / ".env.docker.secret"
+    if docker_env_path.exists():
+        load_dotenv(docker_env_path, override=False)
+    else:
+        print(f"Warning: {docker_env_path} not found", file=sys.stderr)
 
-    required_vars = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
-    for var in required_vars:
+    # Validate LLM required vars
+    llm_required_vars = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
+    for var in llm_required_vars:
         if not os.getenv(var):
-            print(f"Error: Missing required env var: {var}", file=sys.stderr)
+            print(f"Error: Missing required LLM env var: {var}", file=sys.stderr)
             sys.exit(1)
+
+    # LMS_API_KEY is required for query_api
+    if not os.getenv("LMS_API_KEY"):
+        print("Error: Missing required env var: LMS_API_KEY", file=sys.stderr)
+        sys.exit(1)
 
 
 def create_client():
@@ -58,13 +72,13 @@ def get_tool_schemas():
     return [
         {
             "name": "read_file",
-            "description": "Read a file from the project repository",
+            "description": "Read a file from the project repository. Use for source code, documentation, configuration files.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path from project root (e.g., 'wiki/git-workflow.md')"
+                        "description": "Relative path from project root (e.g., 'wiki/git-workflow.md', 'backend/app/main.py')"
                     }
                 },
                 "required": ["path"]
@@ -72,16 +86,39 @@ def get_tool_schemas():
         },
         {
             "name": "list_files",
-            "description": "List files and directories at a given path",
+            "description": "List files and directories at a given path. Use to discover project structure.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative directory path from project root (e.g., 'wiki')"
+                        "description": "Relative directory path from project root (e.g., 'wiki', 'backend')"
                     }
                 },
                 "required": ["path"]
+            }
+        },
+        {
+            "name": "query_api",
+            "description": "Call the deployed backend API to query data, check status codes, or test endpoints. Use for runtime data and system behavior.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)",
+                        "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"]
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate')"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional JSON request body for POST/PUT/PATCH requests"
+                    }
+                },
+                "required": ["method", "path"]
             }
         }
     ]
@@ -178,6 +215,64 @@ def list_files(path):
         return f"Error listing directory: {e}"
 
 
+def query_api(method, path, body=None):
+    """
+    Call the deployed backend API.
+
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: API endpoint path
+        body: Optional JSON request body
+
+    Returns:
+        JSON string with status_code and body, or error message
+    """
+    print(f"Tool: query_api('{method}', '{path}', body={body})", file=sys.stderr)
+
+    # Get API base URL from environment or use default
+    api_base = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
+    api_key = os.getenv("LMS_API_KEY")
+
+    # Build URL
+    url = f"{api_base.rstrip('/')}{path}"
+
+    # Prepare headers
+    headers = {
+        "X-API-Key": api_key,
+        "Content-Type": "application/json"
+    }
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            if method.upper() == "GET":
+                response = client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                response = client.post(url, headers=headers, json=json.loads(body) if body else None)
+            elif method.upper() == "PUT":
+                response = client.put(url, headers=headers, json=json.loads(body) if body else None)
+            elif method.upper() == "DELETE":
+                response = client.delete(url, headers=headers)
+            elif method.upper() == "PATCH":
+                response = client.patch(url, headers=headers, json=json.loads(body) if body else None)
+            else:
+                return f"Error: Unknown method: {method}"
+
+        result = {
+            "status_code": response.status_code,
+            "body": response.text
+        }
+        result_str = json.dumps(result)
+        print(f"  Status: {response.status_code}, Body: {len(response.text)} chars", file=sys.stderr)
+        return result_str
+
+    except httpx.ConnectError as e:
+        return f"Error: Cannot connect to API at {url}: {e}"
+    except json.JSONDecodeError as e:
+        return f"Error: Invalid JSON body: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def execute_tool(tool_name, args):
     """
     Execute a tool and return the result.
@@ -193,6 +288,12 @@ def execute_tool(tool_name, args):
         return read_file(args.get("path", ""))
     elif tool_name == "list_files":
         return list_files(args.get("path", ""))
+    elif tool_name == "query_api":
+        return query_api(
+            args.get("method", "GET"),
+            args.get("path", ""),
+            args.get("body")
+        )
     else:
         return f"Error: Unknown tool: {tool_name}"
 
@@ -212,22 +313,29 @@ def run_agentic_loop(client, question):
     tool_schemas = get_tool_schemas()
 
     # System prompt instructs the LLM how to use tools
-    system_prompt = """You are a documentation assistant that helps users find information in the project wiki.
+    system_prompt = """You are a documentation and system assistant that helps users find information in the project wiki, source code, and deployed backend API.
 
-You have access to two tools:
-1. read_file - Read the contents of a file
+You have access to three tools:
+1. read_file - Read the contents of a file (source code, documentation, configuration)
 2. list_files - List files and directories in a folder
+3. query_api - Call the deployed backend API to query data or test endpoints
 
 To answer questions:
-1. First use list_files to discover relevant files in the wiki/ directory
-2. Then use read_file to read specific files and find the answer
-3. When you find the answer, provide it with a source reference in the format: wiki/filename.md#section-anchor
+- For wiki/documentation questions: Use list_files to discover files, then read_file to find the answer
+- For source code questions: Use list_files to find relevant modules, then read_file to read the code
+- For data queries (item count, scores, etc.): Use query_api to query the backend
+- For system facts (framework, ports, status codes): Use query_api to test endpoints or read_file on source code
+- For bug diagnosis: Use query_api to reproduce the error, then read_file to find the bug in source code
+
+When you find the answer:
+- For wiki/source answers: Include a source reference (file path + optional section anchor)
+- For API answers: The source is the API endpoint you queried
 
 Rules:
-- Always include a source reference (file path + section anchor) in your final answer
 - Call tools one at a time, waiting for results before making the next call
-- If you can't find the answer after exploring relevant files, say so honestly
-- Section anchors are lowercase with hyphens instead of spaces (e.g., #resolving-merge-conflicts)"""
+- If you can't find the answer after exploring, say so honestly
+- Section anchors are lowercase with hyphens (e.g., #resolving-merge-conflicts)
+- For API queries, use the exact endpoint paths (e.g., /items/, /analytics/completion-rate)"""
 
     # Initialize conversation
     messages = [
@@ -287,10 +395,10 @@ Rules:
             continue
         else:
             # LLM provided final answer
-            answer = message.content
-            print(f"LLLM provided final answer", file=sys.stderr)
+            answer = message.content or ""
+            print(f"LLM provided final answer", file=sys.stderr)
 
-            # Extract source from answer (look for wiki/...md#... pattern)
+            # Extract source from answer (look for wiki/...md#... pattern or API endpoints)
             source = extract_source(answer)
 
             return answer, source, tool_calls_log
@@ -309,7 +417,7 @@ Rules:
 def extract_source(answer):
     """
     Extract source reference from the answer.
-    Looks for patterns like wiki/filename.md or wiki/filename.md#section
+    Looks for patterns like wiki/filename.md, backend/...py, or API endpoints.
     """
     import re
 
@@ -319,6 +427,20 @@ def extract_source(answer):
 
     if match:
         return match.group(1).lower()
+
+    # Look for backend source files
+    pattern = r'(backend/[\w\-/]+\.py)'
+    match = re.search(pattern, answer, re.IGNORECASE)
+
+    if match:
+        return match.group(1).lower()
+
+    # Look for API endpoints
+    pattern = r'(/[\w\-/]+/)'
+    match = re.search(pattern, answer)
+
+    if match:
+        return f"API: {match.group(1)}"
 
     # Default if no source found
     return "unknown"
@@ -343,10 +465,10 @@ def main():
     # Run agentic loop
     answer, source, tool_calls = run_agentic_loop(client, question)
 
-    # Build output
+    # Build output - source is now optional (can be null for system questions)
     output = {
         "answer": answer,
-        "source": source,
+        "source": source if source != "unknown" else None,
         "tool_calls": tool_calls
     }
 
