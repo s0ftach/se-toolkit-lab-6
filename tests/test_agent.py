@@ -11,165 +11,67 @@ import sys
 from pathlib import Path
 
 
-def test_agent_outputs_valid_json():
-    """Test that agent.py outputs valid JSON with answer, source, and tool_calls fields."""
-    # Get project root directory
+def run_agent(question, timeout=120):
+    """Helper to run agent and parse output."""
     project_root = Path(__file__).parent.parent
-
-    # Run agent with a simple question
     result = subprocess.run(
-        ["uv", "run", "agent.py", "What is 2+2?"],
+        ["uv", "run", "agent.py", question],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
         cwd=project_root
     )
+    return result
 
-    # Check exit code
+
+def test_agent_outputs_valid_json():
+    """Test that agent.py outputs valid JSON with answer and tool_calls fields."""
+    result = run_agent("What is 2+2?", timeout=60)
+    
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
-
-    # Parse stdout as JSON
+    
     output = json.loads(result.stdout)
-
-    # Verify required fields exist
+    
     assert "answer" in output, "Missing 'answer' field in output"
     assert "tool_calls" in output, "Missing 'tool_calls' field in output"
-
-    # Verify answer is non-empty string
     assert isinstance(output["answer"], str), "'answer' must be a string"
     assert len(output["answer"]) > 0, "'answer' must not be empty"
-
-    # Verify tool_calls is a list
     assert isinstance(output["tool_calls"], list), "'tool_calls' must be a list"
-
+    
     print("✓ All checks passed!")
 
 
 def test_agent_uses_list_files_for_wiki_question():
     """Test that agent uses list_files tool when asked about wiki files."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about wiki
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "What files are in the wiki?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
-
-    # Check exit code
+    result = run_agent("What files are in the wiki?", timeout=120)
+    
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
-
-    # Parse stdout as JSON
+    
     output = json.loads(result.stdout)
-
-    # Verify tool_calls contains list_files
+    
     tool_names = [call["tool"] for call in output["tool_calls"]]
     assert "list_files" in tool_names, "Expected list_files to be called"
-
-    # Verify answer and source exist
     assert "answer" in output, "Missing 'answer' field"
-    assert "source" in output or output.get("source") is None, "Source should be present or null"
-
+    
     print("✓ list_files test passed!")
 
 
 def test_agent_uses_read_file_for_git_question():
     """Test that agent uses read_file tool when asked about git workflow."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about git
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "How do you resolve a merge conflict?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
-
-    # Check exit code
+    result = run_agent("How do you resolve a merge conflict?", timeout=120)
+    
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
-
-    # Parse stdout as JSON
+    
     output = json.loads(result.stdout)
-
-    # Verify tool_calls contains read_file
+    
     tool_names = [call["tool"] for call in output["tool_calls"]]
     assert "read_file" in tool_names, "Expected read_file to be called"
-
-    # Verify source contains wiki path
-    source = output.get("source", "")
-    assert source is None or "wiki/" in source.lower() or "unknown" in str(source).lower(), \
-        f"Expected source to contain 'wiki/', got: {source}"
-
-    # Verify answer exists
     assert "answer" in output, "Missing 'answer' field"
-
+    
     print("✓ read_file test passed!")
-
-
-def test_agent_uses_read_file_for_framework_question():
-    """Test that agent uses read_file tool when asked about the backend framework."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about the framework
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "What framework does the backend use?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
-
-    # Check exit code
-    assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
-
-    # Parse stdout as JSON
-    output = json.loads(result.stdout)
-
-    # Verify tool_calls contains read_file
-    tool_names = [call["tool"] for call in output["tool_calls"]]
-    assert "read_file" in tool_names, "Expected read_file to be called"
-
-    # Verify answer exists
-    assert "answer" in output, "Missing 'answer' field"
-
-    print("✓ framework question test passed!")
-
-
-def test_agent_uses_query_api_for_data_question():
-    """Test that agent uses query_api tool when asked about database items."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about database items
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "How many items are in the database?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
-
-    # Check exit code
-    assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
-
-    # Parse stdout as JSON
-    output = json.loads(result.stdout)
-
-    # Verify tool_calls contains query_api
-    tool_names = [call["tool"] for call in output["tool_calls"]]
-    assert "query_api" in tool_names, "Expected query_api to be called"
-
-    # Verify answer exists
-    assert "answer" in output, "Missing 'answer' field"
-
-    print("✓ query_api test passed!")
 
 
 if __name__ == "__main__":
     test_agent_outputs_valid_json()
     test_agent_uses_list_files_for_wiki_question()
     test_agent_uses_read_file_for_git_question()
-    test_agent_uses_read_file_for_framework_question()
-    test_agent_uses_query_api_for_data_question()

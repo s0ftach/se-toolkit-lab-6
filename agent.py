@@ -12,12 +12,12 @@ Output:
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from openai import OpenAI
 
 
 # Project root directory
@@ -25,6 +25,9 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 
 # Maximum tool calls per question
 MAX_TOOL_CALLS = 10
+
+# Path to Qwen CLI
+QWEN_CLI_PATH = os.path.expanduser("~/.local/share/pnpm/qwen")
 
 
 def load_env():
@@ -43,28 +46,10 @@ def load_env():
     else:
         print(f"Warning: {docker_env_path} not found", file=sys.stderr)
 
-    # Validate LLM required vars
-    llm_required_vars = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
-    for var in llm_required_vars:
-        if not os.getenv(var):
-            print(f"Error: Missing required LLM env var: {var}", file=sys.stderr)
-            sys.exit(1)
-
     # LMS_API_KEY is required for query_api
     if not os.getenv("LMS_API_KEY"):
         print("Error: Missing required env var: LMS_API_KEY", file=sys.stderr)
         sys.exit(1)
-
-
-def create_client():
-    """Create and return the OpenAI-compatible client."""
-    api_key = os.getenv("LLM_API_KEY")
-    api_base = os.getenv("LLM_API_BASE")
-
-    return OpenAI(
-        api_key=api_key,
-        base_url=api_base
-    )
 
 
 def get_tool_schemas():
@@ -129,53 +114,31 @@ def validate_path(path_str):
     Validate that a path is safe and within the project directory.
     Returns the resolved absolute path or None if invalid.
     """
-    # Reject empty paths
     if not path_str or not path_str.strip():
         return None
-
-    # Reject absolute paths
     if path_str.startswith("/"):
         return None
-
-    # Reject paths with traversal
     if ".." in path_str:
         return None
-
-    # Resolve the path against project root
     try:
         full_path = (PROJECT_ROOT / path_str).resolve()
-
-        # Ensure the resolved path is within project root
         if not str(full_path).startswith(str(PROJECT_ROOT)):
             return None
-
         return full_path
     except Exception:
         return None
 
 
 def read_file(path):
-    """
-    Read a file from the project repository.
-
-    Args:
-        path: Relative path from project root
-
-    Returns:
-        File contents as string, or error message
-    """
+    """Read a file from the project repository."""
     print(f"Tool: read_file('{path}')", file=sys.stderr)
-
     validated_path = validate_path(path)
     if validated_path is None:
         return f"Error: Invalid path '{path}'"
-
     if not validated_path.exists():
         return f"Error: File not found: {path}"
-
     if not validated_path.is_file():
         return f"Error: Not a file: {path}"
-
     try:
         content = validated_path.read_text(encoding="utf-8")
         print(f"  Read {len(content)} characters", file=sys.stderr)
@@ -185,27 +148,15 @@ def read_file(path):
 
 
 def list_files(path):
-    """
-    List files and directories at a given path.
-
-    Args:
-        path: Relative directory path from project root
-
-    Returns:
-        Newline-separated listing, or error message
-    """
+    """List files and directories at a given path."""
     print(f"Tool: list_files('{path}')", file=sys.stderr)
-
     validated_path = validate_path(path)
     if validated_path is None:
         return f"Error: Invalid path '{path}'"
-
     if not validated_path.exists():
         return f"Error: Path not found: {path}"
-
     if not validated_path.is_dir():
         return f"Error: Not a directory: {path}"
-
     try:
         entries = sorted([e.name for e in validated_path.iterdir()])
         result = "\n".join(entries)
@@ -216,32 +167,12 @@ def list_files(path):
 
 
 def query_api(method, path, body=None):
-    """
-    Call the deployed backend API.
-
-    Args:
-        method: HTTP method (GET, POST, etc.)
-        path: API endpoint path
-        body: Optional JSON request body
-
-    Returns:
-        JSON string with status_code and body, or error message
-    """
+    """Call the deployed backend API."""
     print(f"Tool: query_api('{method}', '{path}', body={body})", file=sys.stderr)
-
-    # Get API base URL from environment or use default
     api_base = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
     api_key = os.getenv("LMS_API_KEY")
-
-    # Build URL
     url = f"{api_base.rstrip('/')}{path}"
-
-    # Prepare headers
-    headers = {
-        "X-API-Key": api_key,
-        "Content-Type": "application/json"
-    }
-
+    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
     try:
         with httpx.Client(timeout=30.0) as client:
             if method.upper() == "GET":
@@ -256,15 +187,10 @@ def query_api(method, path, body=None):
                 response = client.patch(url, headers=headers, json=json.loads(body) if body else None)
             else:
                 return f"Error: Unknown method: {method}"
-
-        result = {
-            "status_code": response.status_code,
-            "body": response.text
-        }
+        result = {"status_code": response.status_code, "body": response.text}
         result_str = json.dumps(result)
         print(f"  Status: {response.status_code}, Body: {len(response.text)} chars", file=sys.stderr)
         return result_str
-
     except httpx.ConnectError as e:
         return f"Error: Cannot connect to API at {url}: {e}"
     except json.JSONDecodeError as e:
@@ -274,45 +200,93 @@ def query_api(method, path, body=None):
 
 
 def execute_tool(tool_name, args):
-    """
-    Execute a tool and return the result.
-
-    Args:
-        tool_name: Name of the tool to execute
-        args: Dictionary of arguments
-
-    Returns:
-        Tool result as string
-    """
+    """Execute a tool and return the result."""
     if tool_name == "read_file":
         return read_file(args.get("path", ""))
     elif tool_name == "list_files":
         return list_files(args.get("path", ""))
     elif tool_name == "query_api":
-        return query_api(
-            args.get("method", "GET"),
-            args.get("path", ""),
-            args.get("body")
-        )
+        return query_api(args.get("method", "GET"), args.get("path", ""), args.get("body"))
     else:
         return f"Error: Unknown tool: {tool_name}"
 
 
-def run_agentic_loop(client, question):
+def call_llm(messages, tools):
     """
-    Run the agentic loop: send question to LLM, execute tool calls, repeat.
-
+    Call Qwen CLI and return the response.
+    
     Args:
-        client: OpenAI client
-        question: User's question
-
+        messages: List of message dicts with role and content
+        tools: List of tool schemas
+    
     Returns:
-        Tuple of (answer, source, tool_calls_list)
+        Dict with 'content' and/or 'tool_calls'
     """
-    model = os.getenv("LLM_MODEL")
-    tool_schemas = get_tool_schemas()
+    # Build the prompt with tool definitions
+    tool_defs = "\n\nAvailable tools:\n"
+    for tool in tools:
+        tool_defs += f"- {tool['name']}: {tool['description']}\n"
+        tool_defs += f"  Parameters: {json.dumps(tool['parameters'])}\n"
+    
+    # Build conversation history
+    prompt = ""
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "system":
+            prompt += f"System: {content}\n"
+        elif role == "user":
+            prompt += f"User: {content}\n"
+        elif role == "tool":
+            prompt += f"Tool Result: {content}\n"
+        elif role == "assistant":
+            prompt += f"Assistant: {content}\n"
+    
+    # Add tool definitions to system message
+    full_prompt = tool_defs + "\n" + prompt
+    full_prompt += "\nRespond in JSON format: {\"content\": \"...\", \"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}\n"
+    full_prompt += "If no tool calls needed, return: {\"content\": \"your answer\"}\n"
+    
+    print(f"Calling Qwen CLI with {len(messages)} messages", file=sys.stderr)
+    
+    try:
+        result = subprocess.run(
+            [QWEN_CLI_PATH, full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        
+        response_text = result.stdout.strip()
+        print(f"Qwen CLI response: {response_text[:200]}...", file=sys.stderr)
+        
+        # Try to parse as JSON
+        try:
+            # Find JSON in response
+            import re
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                return {
+                    "content": parsed.get("content", ""),
+                    "tool_calls": parsed.get("tool_calls", [])
+                }
+        except json.JSONDecodeError:
+            pass
+        
+        # Return as plain text
+        return {"content": response_text, "tool_calls": []}
+        
+    except subprocess.TimeoutExpired:
+        return {"content": "Error: LLM timeout", "tool_calls": []}
+    except Exception as e:
+        return {"content": f"Error calling LLM: {e}", "tool_calls": []}
 
-    # System prompt instructs the LLM how to use tools
+
+def run_agentic_loop(question):
+    """Run the agentic loop with Qwen CLI."""
+    tool_schemas = get_tool_schemas()
+    
     system_prompt = """You are a documentation and system assistant that helps users find information in the project wiki, source code, and deployed backend API.
 
 You have access to three tools:
@@ -335,114 +309,73 @@ Rules:
 - Call tools one at a time, waiting for results before making the next call
 - If you can't find the answer after exploring, say so honestly
 - Section anchors are lowercase with hyphens (e.g., #resolving-merge-conflicts)
-- For API queries, use the exact endpoint paths (e.g., /items/, /analytics/completion-rate)"""
+- For API queries, use the exact endpoint paths (e.g., /items/, /analytics/completion-rate)
+- Always respond in JSON format with 'content' and 'tool_calls' fields"""
 
-    # Initialize conversation
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question}
     ]
-
+    
     tool_calls_log = []
     iteration = 0
-
+    
     while iteration < MAX_TOOL_CALLS:
         iteration += 1
         print(f"\n--- Iteration {iteration} ---", file=sys.stderr)
-
-        # Send request to LLM
-        print(f"Sending to LLM: {len(messages)} messages", file=sys.stderr)
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tool_schemas,
-            tool_choice="auto",
-            temperature=0.7,
-            max_tokens=1000
-        )
-
-        choice = response.choices[0]
-        message = choice.message
-
-        # Check if LLM wants to call tools
-        if message.tool_calls:
-            # Log tool calls
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-
+        
+        response = call_llm(messages, tool_schemas)
+        content = response.get("content", "")
+        tool_calls = response.get("tool_calls", [])
+        
+        if tool_calls:
+            for tool_call in tool_calls:
+                tool_name = tool_call.get("name", "")
+                tool_args = tool_call.get("arguments", {})
+                
                 print(f"LLM wants to call: {tool_name}({tool_args})", file=sys.stderr)
-
-                # Execute the tool
+                
                 result = execute_tool(tool_name, tool_args)
-
-                # Log to our record
+                
                 tool_calls_log.append({
                     "tool": tool_name,
                     "args": tool_args,
                     "result": result
                 })
-
-                # Add tool result to conversation
+                
                 messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
                     "content": result
                 })
-
-            # Continue loop - LLM will process tool results
             continue
         else:
-            # LLM provided final answer
-            answer = message.content or ""
+            answer = content
             print(f"LLM provided final answer", file=sys.stderr)
-
-            # Extract source from answer (look for wiki/...md#... pattern or API endpoints)
             source = extract_source(answer)
-
             return answer, source, tool_calls_log
-
-    # Max iterations reached
+    
     print(f"Max tool calls ({MAX_TOOL_CALLS}) reached", file=sys.stderr)
-
-    # Try to extract answer from last message
     if tool_calls_log:
         last_result = tool_calls_log[-1]["result"]
         return f"Answer based on available data: {last_result[:500]}...", "unknown", tool_calls_log
-
     return "Unable to find answer within tool call limit", "unknown", tool_calls_log
 
 
 def extract_source(answer):
-    """
-    Extract source reference from the answer.
-    Looks for patterns like wiki/filename.md, backend/...py, or API endpoints.
-    """
+    """Extract source reference from the answer."""
     import re
-
-    # Look for wiki file references
     pattern = r'(wiki/[\w\-/]+\.md(?:#[\w\-]+)?)'
     match = re.search(pattern, answer, re.IGNORECASE)
-
     if match:
         return match.group(1).lower()
-
-    # Look for backend source files
     pattern = r'(backend/[\w\-/]+\.py)'
     match = re.search(pattern, answer, re.IGNORECASE)
-
     if match:
         return match.group(1).lower()
-
-    # Look for API endpoints
     pattern = r'(/[\w\-/]+/)'
     match = re.search(pattern, answer)
-
     if match:
         return f"API: {match.group(1)}"
-
-    # Default if no source found
     return "unknown"
 
 
@@ -451,30 +384,22 @@ def main():
     if len(sys.argv) != 2:
         print("Usage: uv run agent.py \"Your question here\"", file=sys.stderr)
         sys.exit(1)
-
+    
     question = sys.argv[1]
-
-    # Load environment
+    
     load_env()
     print("Environment loaded", file=sys.stderr)
-
-    # Create client
-    client = create_client()
-    print(f"Client created for model: {os.getenv('LLM_MODEL')}", file=sys.stderr)
-
-    # Run agentic loop
-    answer, source, tool_calls = run_agentic_loop(client, question)
-
-    # Build output - source is now optional (can be null for system questions)
+    print(f"Using Qwen CLI: {QWEN_CLI_PATH}", file=sys.stderr)
+    
+    answer, source, tool_calls = run_agentic_loop(question)
+    
     output = {
         "answer": answer,
         "source": source if source != "unknown" else None,
         "tool_calls": tool_calls
     }
-
-    # Output JSON to stdout
+    
     print(json.dumps(output))
-
     return 0
 
 
