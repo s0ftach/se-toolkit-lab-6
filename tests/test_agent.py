@@ -44,8 +44,8 @@ def test_agent_outputs_valid_json():
     assert isinstance(output["answer"], str), "'answer' must be a string"
     assert len(output["answer"]) > 0, "'answer' must not be empty"
 
-    # Verify source is a string
-    assert isinstance(output["source"], str), "'source' must be a string"
+    # Verify source is a string or None (for API data questions)
+    assert output["source"] is None or isinstance(output["source"], str), "'source' must be a string or None"
 
     # Verify tool_calls is a list
     assert isinstance(output["tool_calls"], list), "'tool_calls' must be a list"
