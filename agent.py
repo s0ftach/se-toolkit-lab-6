@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Agent CLI - Calls an LLM with tools and returns a structured JSON answer.
+Agent CLI - Calls Qwen CLI with tools and returns a structured JSON answer.
 
 Usage:
     uv run agent.py "Your question here"
@@ -36,21 +36,18 @@ QWEN_CLI_PATH = os.path.expanduser("~/.local/share/pnpm/qwen")
 
 def load_env():
     """Load environment variables from .env.agent.secret and .env.docker.secret."""
-    # Load .env.agent.secret for LLM config
     agent_env_path = Path(__file__).parent / ".env.agent.secret"
     if agent_env_path.exists():
         load_dotenv(agent_env_path)
     else:
         print(f"Warning: {agent_env_path} not found", file=sys.stderr)
 
-    # Load .env.docker.secret for LMS API key
     docker_env_path = Path(__file__).parent / ".env.docker.secret"
     if docker_env_path.exists():
         load_dotenv(docker_env_path, override=False)
     else:
         print(f"Warning: {docker_env_path} not found", file=sys.stderr)
 
-    # LMS_API_KEY is required for query_api
     if not os.getenv("LMS_API_KEY"):
         print("Error: Missing required env var: LMS_API_KEY", file=sys.stderr)
         sys.exit(1)
@@ -114,10 +111,7 @@ def get_tool_schemas():
 
 
 def validate_path(path_str):
-    """
-    Validate that a path is safe and within the project directory.
-    Returns the resolved absolute path or None if invalid.
-    """
+    """Validate that a path is safe and within the project directory."""
     if not path_str or not path_str.strip():
         return None
     if path_str.startswith("/"):
@@ -216,17 +210,8 @@ def execute_tool(tool_name, args):
 
 
 def call_llm(messages, tools):
-    """
-    Call Qwen CLI and return the response.
-    
-    Args:
-        messages: List of message dicts with role and content
-        tools: List of tool schemas
-    
-    Returns:
-        Dict with 'content' and/or 'tool_calls'
-    """
-    # Build the prompt with tool definitions
+    """Call Qwen CLI and return the response."""
+    # Build tool definitions
     tool_defs = "\n\nAvailable tools:\n"
     for tool in tools:
         tool_defs += f"- {tool['name']}: {tool['description']}\n"
@@ -246,7 +231,6 @@ def call_llm(messages, tools):
         elif role == "assistant":
             prompt += f"Assistant: {content}\n"
     
-    # Add tool definitions to system message
     full_prompt = tool_defs + "\n" + prompt
     full_prompt += "\nRespond in JSON format: {\"content\": \"...\", \"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}\n"
     full_prompt += "If no tool calls needed, return: {\"content\": \"your answer\"}\n"
@@ -265,18 +249,14 @@ def call_llm(messages, tools):
         print(f"Qwen CLI response: {response_text[:200]}...", file=sys.stderr)
         
         # Try to parse as JSON
-        try:
-            # Find JSON in response
-            import re
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                return {
-                    "content": parsed.get("content", ""),
-                    "tool_calls": parsed.get("tool_calls", [])
-                }
-        except json.JSONDecodeError:
-            pass
+        import re
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+            return {
+                "content": parsed.get("content", ""),
+                "tool_calls": parsed.get("tool_calls", [])
+            }
         
         # Return as plain text
         return {"content": response_text, "tool_calls": []}
@@ -291,39 +271,27 @@ def run_agentic_loop(question):
     """Run the agentic loop with Qwen CLI."""
     tool_schemas = get_tool_schemas()
     
-    system_prompt = """You are a documentation and system assistant that helps users find information in the project wiki, source code, and deployed backend API.
+    system_prompt = """You are an AI assistant for a software engineering project.
+You have access to tools: read_file, list_files, query_api.
 
-You have access to three tools:
-1. read_file - Read the contents of a file (source code, documentation, configuration)
-2. list_files - List files and directories in a folder  
-3. query_api - Call the deployed backend API to query data or test endpoints
+RULES:
+1. For wiki questions: FIRST list_files("wiki"), THEN read_file relevant files
+2. ALWAYS include source reference in format "wiki/filename.md"
+3. Answer questions completely based on file contents
+4. If you need more info, use tools - don't guess
 
-CRITICAL RULES:
-1. For ANY question about wiki documentation - you MUST use read_file to read the file content before answering
-2. list_files returns ONLY file names - it does NOT contain the content you need to answer
-3. After using list_files, you MUST use read_file on the relevant file(s) to get the actual information
-4. NEVER answer based on list_files results alone - that's just a file listing!
-
-Step-by-step process:
-1. Use list_files to find which files exist
-2. Use read_file to read the specific file(s) that contain the answer
-3. Only then provide your answer based on what you READ
-
-For data/API questions: Use query_api to get the data first.
-
-Always respond in JSON format: {"content": "...", "tool_calls": [...]}"""
-
+Respond in JSON format with 'content' and 'tool_calls' fields."""
+    
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": question}
     ]
     
     tool_calls_log = []
-    iteration = 0
+    max_iterations = 10
     
-    while iteration < MAX_TOOL_CALLS:
-        iteration += 1
-        print(f"\n--- Iteration {iteration} ---", file=sys.stderr)
+    for iteration in range(max_iterations):
+        print(f"\n--- Iteration {iteration + 1} ---", file=sys.stderr)
         
         response = call_llm(messages, tool_schemas)
         content = response.get("content", "")
@@ -363,41 +331,30 @@ Always respond in JSON format: {"content": "...", "tool_calls": [...]}"""
 
 
 def extract_source(answer, tool_calls_log):
-    """Extract source reference from the answer or tool calls."""
+    """Extract source from answer or tool calls."""
     import re
     
-    # First try to find wiki/ pattern
-    pattern = r'(wiki/[\w\-/]+\.md(?:#[\w\-]+)?)'
-    match = re.search(pattern, answer, re.IGNORECASE)
+    # Look for wiki/file.md in answer
+    match = re.search(r'(wiki/[\w\-/]+\.md)', answer, re.IGNORECASE)
     if match:
         return match.group(1).lower()
     
-    # Try backend/ pattern
-    pattern = r'(backend/[\w\-/]+\.py)'
-    match = re.search(pattern, answer, re.IGNORECASE)
+    # Look for backend/...py
+    match = re.search(r'(backend/[\w\-/]+\.py)', answer, re.IGNORECASE)
     if match:
         return match.group(1).lower()
     
-    # Try to find .md file references and assume wiki/
-    pattern = r'\b([\w\-]+\.md)\b'
-    match = re.search(pattern, answer, re.IGNORECASE)
-    if match:
-        return f"wiki/{match.group(1).lower()}"
+    # Check last read_file with wiki path
+    for tc in reversed(tool_calls_log):
+        if tc["tool"] == "read_file" and "wiki" in tc["args"].get("path", ""):
+            return tc["args"]["path"].lower()
     
-    # Check tool calls for read_file with wiki path
-    for tc in tool_calls_log:
-        if tc.get('tool') == 'read_file':
-            path = tc.get('args', {}).get('path', '')
-            if path.startswith('wiki/'):
-                return path.lower()
-    
-    # Try API pattern
-    pattern = r'(/[\w\-/]+/)'
-    match = re.search(pattern, answer)
+    # Check for API endpoint
+    match = re.search(r'(/[\w\-/]+/)', answer)
     if match:
         return f"API: {match.group(1)}"
     
-    return "unknown"
+    return None
 
 
 def main():
@@ -405,25 +362,21 @@ def main():
     if len(sys.argv) != 2:
         print("Usage: uv run agent.py \"Your question here\"", file=sys.stderr)
         sys.exit(1)
-    
+
     question = sys.argv[1]
-    
+
     load_env()
     print("Environment loaded", file=sys.stderr)
     print(f"Using Qwen CLI: {QWEN_CLI_PATH}", file=sys.stderr)
-    
+
     answer, source, tool_calls = run_agentic_loop(question)
-    
-    # If source is still unknown, try to extract from answer/tool_calls
-    if source == "unknown":
-        source = extract_source(answer, tool_calls)
-    
+
     output = {
         "answer": answer,
-        "source": source if source != "unknown" else None,
+        "source": source,
         "tool_calls": tool_calls
     }
-    
+
     print(json.dumps(output))
     return 0
 

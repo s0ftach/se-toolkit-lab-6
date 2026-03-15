@@ -148,6 +148,9 @@ def _run_agent(question: str, timeout: int = 120) -> tuple[AgentOutput, None] | 
     if not stdout:
         return None, "Agent produced no output"
 
+    # Debug: print stderr to see what agent did
+    print(f"    [debug] Agent stderr (last 200 chars): {result.stderr[-200:]}")
+
     try:
         data = json.loads(stdout)
     except json.JSONDecodeError:
