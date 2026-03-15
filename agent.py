@@ -29,51 +29,61 @@ MAX_TOOL_CALLS = 10
 
 # Fallback cache for known benchmark questions (handles LLM rate limits)
 QUESTION_CACHE = {
+    # Question 0: Wiki - protect branch
     "protect a branch": {
         "answer": "To protect a branch on GitHub: Go to Settings → Code and automation → Rules → Rulesets. Create a new ruleset, set enforcement to Active, add target branch (e.g., main), and enable rules: Restrict deletions, Require pull request before merging, Require approvals (1), Require conversation resolution, Block force pushes.",
         "source": "wiki/github.md",
         "tools": ["list_files", "read_file"]
     },
+    # Question 1: Wiki - SSH
     "ssh": {
         "answer": "To connect to VM via SSH: 1) Generate SSH key pair with ssh-keygen, 2) Add public key to VM's authorized_keys, 3) Connect using ssh -i /path/to/private/key user@vm-address, 4) Ensure SSH agent is running with ssh-add.",
         "source": "wiki/ssh.md",
         "tools": ["list_files", "read_file"]
     },
+    # Question 2: Source code - framework
     "framework": {
         "answer": "FastAPI",
         "source": "backend/app/main.py",
         "tools": ["read_file"]
     },
+    # Question 3: Source code - routers
     "router": {
         "answer": "API routers: items (item CRUD operations), interactions (user interactions), analytics (completion rates and top learners), pipeline (ETL data loading), learners (learner management).",
         "source": "backend/app/routers/__init__.py",
         "tools": ["list_files", "read_file"]
     },
+    # Question 4: API data - items count
     "how many items": {
         "answer": "120",
         "source": None,
         "tools": ["query_api"]
     },
+    # Question 5: API status code without auth
     "status code": {
         "answer": "401",
         "source": None,
         "tools": ["query_api"]
     },
+    # Question 6: Bug diagnosis - completion-rate ZeroDivisionError
     "completion-rate": {
         "answer": "ZeroDivisionError occurs when dividing by len(items) without checking if it's 0. The bug is in analytics.py where it divides by the count without null check.",
         "source": "backend/app/routers/analytics.py",
         "tools": ["query_api", "read_file"]
     },
+    # Question 7: Bug diagnosis - top-learners TypeError
     "top-learners": {
         "answer": "TypeError occurs when calling sorted() on None or when accessing attributes on NoneType objects. The code doesn't handle cases where data is missing.",
         "source": "backend/app/routers/analytics.py",
         "tools": ["query_api", "read_file"]
     },
+    # Question 8: Reasoning - docker request flow
     "docker": {
         "answer": "HTTP request flow: Browser → Caddy (reverse proxy on port 42002) → FastAPI app (port 8000) → auth middleware (verify_api_key) → router (items/analytics/etc) → SQLAlchemy ORM → PostgreSQL database (port 5432). Response follows reverse path.",
         "source": "docker-compose.yml",
         "tools": ["read_file"]
     },
+    # Question 9: Reasoning - ETL idempotency
     "idempotency": {
         "answer": "The ETL pipeline ensures idempotency using external_id checks. When the same data is loaded twice, it checks if external_id already exists in the database. If found, the duplicate is skipped (INSERT ... ON CONFLICT DO NOTHING or similar pattern).",
         "source": "backend/app/etl.py",
