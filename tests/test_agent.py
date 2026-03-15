@@ -11,19 +11,22 @@ import sys
 from pathlib import Path
 
 
-def test_agent_outputs_valid_json():
-    """Test that agent.py outputs valid JSON with answer, source, and tool_calls fields."""
-    # Get project root directory
+def run_agent(question, timeout=120):
+    """Helper to run agent and parse output."""
     project_root = Path(__file__).parent.parent
-
-    # Run agent with a simple question
     result = subprocess.run(
-        ["uv", "run", "agent.py", "What is 2+2?"],
+        ["uv", "run", "agent.py", question],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
         cwd=project_root
     )
+    return result
+
+
+def test_agent_outputs_valid_json():
+    """Test that agent.py outputs valid JSON with answer, source, and tool_calls fields."""
+    result = run_agent("What is 2+2?")
 
     # Check exit code
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
@@ -51,16 +54,7 @@ def test_agent_outputs_valid_json():
 
 def test_agent_uses_list_files_for_wiki_question():
     """Test that agent uses list_files tool when asked about wiki files."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about wiki
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "What files are in the wiki?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
+    result = run_agent("What files are in the wiki?")
 
     # Check exit code
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
@@ -81,16 +75,7 @@ def test_agent_uses_list_files_for_wiki_question():
 
 def test_agent_uses_read_file_for_git_question():
     """Test that agent uses read_file tool when asked about git workflow."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about git
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "How do you resolve a merge conflict?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
+    result = run_agent("How do you resolve a merge conflict?")
 
     # Check exit code
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
@@ -114,16 +99,7 @@ def test_agent_uses_read_file_for_git_question():
 
 def test_agent_uses_read_file_for_framework_question():
     """Test that agent uses read_file tool when asked about backend framework."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about framework
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "What Python web framework does this project's backend use?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
+    result = run_agent("What Python web framework does this project's backend use?")
 
     # Check exit code
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
@@ -143,16 +119,7 @@ def test_agent_uses_read_file_for_framework_question():
 
 def test_agent_uses_query_api_for_data_question():
     """Test that agent uses query_api tool when asked about database items."""
-    project_root = Path(__file__).parent.parent
-
-    # Run agent with a question about database items
-    result = subprocess.run(
-        ["uv", "run", "agent.py", "How many items are currently stored in the database?"],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=project_root
-    )
+    result = run_agent("How many items are currently stored in the database?")
 
     # Check exit code
     assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
