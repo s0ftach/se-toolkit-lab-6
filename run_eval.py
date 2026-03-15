@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import TypedDict
 
@@ -359,6 +360,10 @@ def main():
             print(f"  {GREEN}+ [{index + 1}/{total}] {question}{RESET}")
             passed += 1
             index += 1
+            
+            # Pause between questions to avoid rate limiting
+            print(f"    [Waiting 10s to avoid rate limits...]", file=sys.stderr)
+            time.sleep(10)
         else:
             answer = data.get("answer", "")
             print(f"\n  {RED}x [{index + 1}/{total}] {question}{RESET}")
