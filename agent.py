@@ -16,7 +16,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-import httpx
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 from dotenv import load_dotenv
 
 
@@ -291,26 +295,23 @@ def run_agentic_loop(question):
 
 You have access to three tools:
 1. read_file - Read the contents of a file (source code, documentation, configuration)
-2. list_files - List files and directories in a folder
+2. list_files - List files and directories in a folder  
 3. query_api - Call the deployed backend API to query data or test endpoints
 
-To answer questions:
-- For wiki/documentation questions: Use list_files to discover files, then read_file to find the answer
-- For source code questions: Use list_files to find relevant modules, then read_file to read the code
-- For data queries (item count, scores, etc.): Use query_api to query the backend
-- For system facts (framework, ports, status codes): Use query_api to test endpoints or read_file on source code
-- For bug diagnosis: Use query_api to reproduce the error, then read_file to find the bug in source code
+CRITICAL RULES:
+1. For ANY question about wiki documentation - you MUST use read_file to read the file content before answering
+2. list_files returns ONLY file names - it does NOT contain the content you need to answer
+3. After using list_files, you MUST use read_file on the relevant file(s) to get the actual information
+4. NEVER answer based on list_files results alone - that's just a file listing!
 
-When you find the answer:
-- For wiki/source answers: Include a source reference (file path + optional section anchor)
-- For API answers: The source is the API endpoint you queried
+Step-by-step process:
+1. Use list_files to find which files exist
+2. Use read_file to read the specific file(s) that contain the answer
+3. Only then provide your answer based on what you READ
 
-Rules:
-- Call tools one at a time, waiting for results before making the next call
-- If you can't find the answer after exploring, say so honestly
-- Section anchors are lowercase with hyphens (e.g., #resolving-merge-conflicts)
-- For API queries, use the exact endpoint paths (e.g., /items/, /analytics/completion-rate)
-- Always respond in JSON format with 'content' and 'tool_calls' fields"""
+For data/API questions: Use query_api to get the data first.
+
+Always respond in JSON format: {"content": "...", "tool_calls": [...]}"""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -351,7 +352,7 @@ Rules:
         else:
             answer = content
             print(f"LLM provided final answer", file=sys.stderr)
-            source = extract_source(answer)
+            source = extract_source(answer, tool_calls_log)
             return answer, source, tool_calls_log
     
     print(f"Max tool calls ({MAX_TOOL_CALLS}) reached", file=sys.stderr)
@@ -361,21 +362,41 @@ Rules:
     return "Unable to find answer within tool call limit", "unknown", tool_calls_log
 
 
-def extract_source(answer):
-    """Extract source reference from the answer."""
+def extract_source(answer, tool_calls_log):
+    """Extract source reference from the answer or tool calls."""
     import re
+    
+    # First try to find wiki/ pattern
     pattern = r'(wiki/[\w\-/]+\.md(?:#[\w\-]+)?)'
     match = re.search(pattern, answer, re.IGNORECASE)
     if match:
         return match.group(1).lower()
+    
+    # Try backend/ pattern
     pattern = r'(backend/[\w\-/]+\.py)'
     match = re.search(pattern, answer, re.IGNORECASE)
     if match:
         return match.group(1).lower()
+    
+    # Try to find .md file references and assume wiki/
+    pattern = r'\b([\w\-]+\.md)\b'
+    match = re.search(pattern, answer, re.IGNORECASE)
+    if match:
+        return f"wiki/{match.group(1).lower()}"
+    
+    # Check tool calls for read_file with wiki path
+    for tc in tool_calls_log:
+        if tc.get('tool') == 'read_file':
+            path = tc.get('args', {}).get('path', '')
+            if path.startswith('wiki/'):
+                return path.lower()
+    
+    # Try API pattern
     pattern = r'(/[\w\-/]+/)'
     match = re.search(pattern, answer)
     if match:
         return f"API: {match.group(1)}"
+    
     return "unknown"
 
 
@@ -392,6 +413,10 @@ def main():
     print(f"Using Qwen CLI: {QWEN_CLI_PATH}", file=sys.stderr)
     
     answer, source, tool_calls = run_agentic_loop(question)
+    
+    # If source is still unknown, try to extract from answer/tool_calls
+    if source == "unknown":
+        source = extract_source(answer, tool_calls)
     
     output = {
         "answer": answer,
