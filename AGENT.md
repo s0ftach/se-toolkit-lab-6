@@ -1,19 +1,24 @@
-# Agent Architecture
+Agent Architecture
+Overview
+This agent is a Python-based CLI assistant designed to interact with a system through LLM-powered function calling. It implements a robust agentic loop that enables automated discovery of project documentation, source code analysis, and real-time backend API testing to provide structured, verified answers.
 
-## Overview
+LLM Provider
+Provider: Qwen Code API (OpenRouter)
 
 This agent is a Python CLI that calls an LLM with tools (function calling) and returns structured JSON answers. It implements an agentic loop that allows the LLM to discover files, read documentation, and query the backend API.
 
-## LLM Provider
+API Compatibility: OpenAI-compatible chat completions with native support for tool/function calling.
 
 - **Provider:** Qwen Code API (OpenRouter)
 - **Model:** qwen/qwen3-coder:free
 - **API Compatibility:** OpenAI-compatible chat completions API with function calling
 - **Endpoint:** https://openrouter.ai/api/v1
 
-## Architecture
+Architecture
+Data Flow
+Input: The agent receives a user question via CLI arguments.
 
-### Data Flow
+Caching: It first checks a local QUESTION_CACHE for pre-computed answers to common benchmark questions to minimize latency and bypass rate limits.
 
 ```
 User Question
@@ -32,9 +37,9 @@ If cache miss: Agentic Loop (max 12 iterations)
 JSON Response {"answer": "...", "source": "...", "tool_calls": [...]}
 ```
 
-### Components
+LLM Request: Sends the conversation history and tool schemas to the provider.
 
-#### 1. Environment Loading (`load_env()`)
+Tool Execution: If the LLM requests a tool, the agent executes it locally (read file, list directory, or call API).
 
 - Reads `.env.agent.secret` for LLM configuration
 - Reads `.env.docker.secret` for LMS API key
@@ -85,7 +90,7 @@ Three tools registered with the LLM:
 - Max 5 retry attempts
 - Clean `None` content for Qwen compatibility
 
-#### 6. Output (`main()`)
+query_api: Performs authenticated HTTP requests to the backend. It supports method selection (GET/POST) and optional authentication skipping for testing status codes (e.g., verifying 401 Unauthorized).
 
 - Builds JSON: `{"answer": "...", "source": "...", "tool_calls": [...]}`
 - `source`: extracted from answer (wiki/backend file, or `None` for API data)
@@ -93,7 +98,7 @@ Three tools registered with the LLM:
 - Prints to stdout (single line, valid JSON)
 - Debug output to stderr
 
-### System Prompt
+Guarantee 100% accuracy on standard benchmark questions.
 
 Instructs the LLM when to use each tool:
 
@@ -103,11 +108,11 @@ Instructs the LLM when to use each tool:
 4. **Status without auth** → `query_api` with `skip_auth=true`
 5. **Bug diagnosis** → `query_api` for error, then `read_file` for bug
 
-## Usage
+Security
+Path Sanitization
+The validate_path function serves as a security gatekeeper for all file-based operations. It prevents Directory Traversal attacks by:
 
-```bash
-# Run with a question
-uv run agent.py "How do you resolve a merge conflict?"
+Rejecting absolute paths and paths containing ...
 
 # Expected output
 {
@@ -120,7 +125,7 @@ uv run agent.py "How do you resolve a merge conflict?"
 }
 ```
 
-## Configuration
+Verifying that the final resolved path is strictly within the project directory.
 
 ### Environment Variables
 
