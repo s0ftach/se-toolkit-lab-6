@@ -108,6 +108,46 @@ def test_agent_uses_query_api_for_data_question():
     print("✓ data question test passed!")
 
 
+def test_agent_uses_read_file_for_framework_question():
+    """Test that agent uses read_file tool when asked about backend framework."""
+    result = run_agent("What Python web framework does this project's backend use?")
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
+
+    # Parse stdout as JSON
+    output = json.loads(result.stdout)
+
+    # Verify tool_calls contains read_file
+    tool_names = [call["tool"] for call in output["tool_calls"]]
+    assert "read_file" in tool_names, f"Expected read_file to be called for framework question. Got: {tool_names}"
+
+    # Verify answer exists
+    assert "answer" in output, "Missing 'answer' field"
+
+    print("✓ framework question test passed!")
+
+
+def test_agent_uses_query_api_for_data_question():
+    """Test that agent uses query_api tool when asked about database items."""
+    result = run_agent("How many items are currently stored in the database?")
+
+    # Check exit code
+    assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
+
+    # Parse stdout as JSON
+    output = json.loads(result.stdout)
+
+    # Verify tool_calls contains query_api
+    tool_names = [call["tool"] for call in output["tool_calls"]]
+    assert "query_api" in tool_names, f"Expected query_api to be called for data question. Got: {tool_names}"
+
+    # Verify answer exists
+    assert "answer" in output, "Missing 'answer' field"
+
+    print("✓ data question test passed!")
+
+
 if __name__ == "__main__":
     test_agent_outputs_valid_json()
     test_agent_uses_list_files_for_wiki_question()
