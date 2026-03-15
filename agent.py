@@ -13,70 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
-MAX_TOOL_CALLS = 12
-
-# ========== FALLBACK CACHE FOR BENCHMARK QUESTIONS ==========
-QUESTION_CACHE = {
-    "protect a branch": {
-        "answer": "To protect a branch on GitHub: Go to Settings → Code and automation → Rules → Rulesets. Create a new ruleset, set enforcement to Active, add target branch (e.g., main), and enable rules: Restrict deletions, Require pull request before merging, Require approvals (1), Require conversation resolution, Block force pushes.",
-        "source": "wiki/github.md",
-        "tools": ["list_files", "read_file"]
-    },
-    "ssh": {
-        "answer": "To connect to VM via SSH: 1) Generate SSH key pair with ssh-keygen, 2) Add public key to VM's authorized_keys, 3) Connect using ssh -i /path/to/private/key user@vm-address, 4) Ensure SSH agent is running with ssh-add.",
-        "source": "wiki/ssh.md",
-        "tools": ["list_files", "read_file"]
-    },
-    "framework": {
-        "answer": "FastAPI",
-        "source": "backend/app/main.py",
-        "tools": ["read_file"]
-    },
-    "router": {
-        "answer": "API routers: items (item CRUD operations), interactions (user interactions), analytics (completion rates and top learners), pipeline (ETL data loading), learners (learner management).",
-        "source": "backend/app/routers/__init__.py",
-        "tools": ["list_files", "read_file"]
-    },
-    "how many items": {
-        "answer": "120",
-        "source": None,
-        "tools": ["query_api"]
-    },
-    "status code": {
-        "answer": "401",
-        "source": None,
-        "tools": ["query_api"]
-    },
-    "completion-rate": {
-        "answer": "ZeroDivisionError occurs when dividing by len(items) without checking if it's 0. The bug is in analytics.py where it divides by the count without null check.",
-        "source": "backend/app/routers/analytics.py",
-        "tools": ["query_api", "read_file"]
-    },
-    "top-learners": {
-        "answer": "TypeError occurs when calling sorted() on None or when accessing attributes on NoneType objects. The code doesn't handle cases where data is missing.",
-        "source": "backend/app/routers/analytics.py",
-        "tools": ["query_api", "read_file"]
-    },
-    "docker": {
-        "answer": "HTTP request flow: Browser → Caddy (reverse proxy on port 42002) → FastAPI app (port 8000) → auth middleware (verify_api_key) → router (items/analytics/etc) → SQLAlchemy ORM → PostgreSQL database (port 5432). Response follows reverse path.",
-        "source": "docker-compose.yml",
-        "tools": ["read_file"]
-    },
-    "idempotency": {
-        "answer": "The ETL pipeline ensures idempotency using external_id checks. When the same data is loaded twice, it checks if external_id already exists in the database. If found, the duplicate is skipped (INSERT ... ON CONFLICT DO NOTHING or similar pattern).",
-        "source": "backend/app/etl.py",
-        "tools": ["read_file"]
-    }
-}
-
-
-def find_cached_answer(question):
-    """Find cached answer for known benchmark questions."""
-    question_lower = question.lower()
-    for key, value in QUESTION_CACHE.items():
-        if key.lower() in question_lower:
-            return value
-    return None
+MAX_TOOL_CALLS = 15
 
 
 def load_env():
@@ -161,6 +98,7 @@ WHEN TO USE EACH TOOL:
 - Data/API questions → query_api with skip_auth=false
 - Status without auth → query_api with skip_auth=true
 - Bug diagnosis → query_api to get error, then read_file to find bug
+- Docker/infrastructure → read_file on docker-compose.yml, Dockerfile
 
 RULES:
 - NEVER answer from internal knowledge - always use tools
@@ -252,37 +190,7 @@ def call_llm(messages):
 
 
 def run_agentic_loop(question):
-    """Run the agentic loop with cache fallback."""
-    # Check cache first for known questions
-    cached = find_cached_answer(question)
-    if cached:
-        print(f"  [CACHE] Using cached answer", file=sys.stderr)
-        tool_calls_log = []
-        source = cached.get("source")
-        
-        for tool in cached.get("tools", []):
-            if tool == "list_files":
-                tool_calls_log.append({
-                    "tool": "list_files",
-                    "args": {"path": "backend/app/routers" if "router" in cached.get("answer", "").lower() else "wiki"},
-                    "result": "Cached"
-                })
-            elif tool == "read_file":
-                tool_calls_log.append({
-                    "tool": "read_file",
-                    "args": {"path": source} if source else {"path": "unknown"},
-                    "result": "Cached"
-                })
-            elif tool == "query_api":
-                tool_calls_log.append({
-                    "tool": "query_api",
-                    "args": {"method": "GET", "path": "/items/", "skip_auth": False},
-                    "result": "Cached"
-                })
-        
-        return cached["answer"], source, tool_calls_log
-    
-    # LLM-based agentic loop
+    """Run the agentic loop."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question}
