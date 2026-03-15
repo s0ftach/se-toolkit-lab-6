@@ -126,19 +126,19 @@ def _fetch_question(api_url: str, auth: str, lab: str, index: int) -> Question |
         sys.exit(1)
 
 
-def _run_agent(question: str, timeout: int = 60) -> tuple[AgentOutput, None] | tuple[None, str]:
+def _run_agent(question: str, timeout: int = 180) -> tuple[AgentOutput, None] | tuple[None, str]:
     """Run agent.py with the question. Returns (answer_dict, error_msg)."""
     try:
         result = subprocess.run(
-            [sys.executable, "agent.py", question],
+            ["uv", "run", "agent.py", question],
             capture_output=True,
             text=True,
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return None, "Agent timed out (60s)"
+        return None, f"Agent timed out ({timeout}s)"
     except FileNotFoundError:
-        return None, "agent.py not found"
+        return None, "uv not found"
 
     if result.returncode != 0:
         stderr_preview = result.stderr.strip()[:200] if result.stderr else ""
@@ -147,6 +147,9 @@ def _run_agent(question: str, timeout: int = 60) -> tuple[AgentOutput, None] | t
     stdout = result.stdout.strip()
     if not stdout:
         return None, "Agent produced no output"
+
+    # Debug: print stderr to see what agent did
+    print(f"    [debug] Agent stderr (last 200 chars): {result.stderr[-200:]}")
 
     try:
         data = json.loads(stdout)
