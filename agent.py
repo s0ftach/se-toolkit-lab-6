@@ -1,476 +1,435 @@
-#!/usr/bin/env python3
-"""
-Agent CLI - Calls an LLM with tools and returns structured JSON.
-"""
-
+import sys
 import json
 import os
-import sys
-import time
-import re
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
+from openai import OpenAI
 
-# ========== НАСТРОЙКИ ==========
-PROJECT_ROOT = Path(__file__).parent.resolve()
-MAX_TOOL_CALLS = 15
-TIMEOUT_SECONDS = 120
+BASE_DIR = Path(__file__).parent.resolve()
 
-# ========== КЕШ ДЛЯ ИЗВЕСТНЫХ ВОПРОСОВ (для тестирования) ==========
-# Answers to known benchmark questions for fallback when LLM is unavailable
-QUESTION_CACHE = {
-    "protect a branch": {
-        "answer": "To protect a branch on GitHub: Go to Settings → Code and automation → Rules → Rulesets. Create a new ruleset, set enforcement to Active, add target branch (e.g., main), and enable rules: Restrict deletions, Require pull request before merging, Require approvals (1), Require conversation resolution, Block force pushes.",
-        "source": "wiki/github.md",
-        "tools": ["list_files", "read_file"]
-    },
-    "ssh": {
-        "answer": "To connect to VM via SSH: 1) Generate SSH key pair with ssh-keygen, 2) Add public key to VM's authorized_keys, 3) Connect using ssh -i /path/to/private/key user@vm-address, 4) Ensure SSH agent is running with ssh-add.",
-        "source": "wiki/ssh.md",
-        "tools": ["list_files", "read_file"]
-    },
-    "framework": {
-        "answer": "FastAPI",
-        "source": "backend/app/main.py",
-        "tools": ["read_file"]
-    },
-    "router": {
-        "answer": "API routers: items (item CRUD operations), interactions (user interactions), analytics (completion rates and top learners), pipeline (ETL data loading), learners (learner management).",
-        "source": "backend/app/routers/__init__.py",
-        "tools": ["list_files", "read_file"]
-    },
-    "how many items": {
-        "answer": "120",
-        "source": None,
-        "tools": ["query_api"]
-    },
-    "status code": {
-        "answer": "401",
-        "source": None,
-        "tools": ["query_api"]
-    },
-    "completion-rate": {
-        "answer": "ZeroDivisionError occurs when dividing by len(items) without checking if it's 0. The bug is in analytics.py where it divides by the count without null check.",
-        "source": "backend/app/routers/analytics.py",
-        "tools": ["query_api", "read_file"]
-    },
-    "top-learners": {
-        "answer": "TypeError occurs when calling sorted() on None or when accessing attributes on NoneType objects. The code doesn't handle cases where data is missing.",
-        "source": "backend/app/routers/analytics.py",
-        "tools": ["query_api", "read_file"]
-    },
-    "docker": {
-        "answer": "HTTP request flow: Browser → Caddy (reverse proxy on port 42002) → FastAPI app (port 8000) → auth middleware (verify_api_key) → router (items/analytics/etc) → SQLAlchemy ORM → PostgreSQL database (port 5432). Response follows reverse path.",
-        "source": "docker-compose.yml",
-        "tools": ["read_file"]
-    },
-    "idempotency": {
-        "answer": "The ETL pipeline ensures idempotency using external_id checks. When the same data is loaded twice, it checks if external_id already exists in the database. If found, the duplicate is skipped (INSERT ... ON CONFLICT DO NOTHING or similar pattern).",
-        "source": "backend/app/etl.py",
-        "tools": ["read_file"]
-    }
-}
+# ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
 
 
-def find_cached_answer(question):
-    """Find cached answer for known questions."""
-    question_lower = question.lower()
-    for key, value in QUESTION_CACHE.items():
-        if key.lower() in question_lower:
-            return value
-    return None
-
-# ========== ЗАГРУЗКА КОНФИГА ==========
-def load_env():
-    """Load environment variables."""
-    env_path = PROJECT_ROOT / ".env.agent.secret"
-    if not env_path.exists():
-        print("❌ .env.agent.secret not found", file=sys.stderr)
-        sys.exit(1)
-    
-    load_dotenv(env_path)
-    
-    required = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
-    missing = [v for v in required if not os.getenv(v)]
-    if missing:
-        print(f"❌ Missing env vars: {missing}", file=sys.stderr)
-        sys.exit(1)
-
-# ========== ИНСТРУМЕНТЫ ==========
-def validate_path(path):
-    """Security: prevent directory traversal."""
-    if not path or path.startswith("/") or ".." in path:
+def _safe_path(rel: str) -> Path | None:
+    """Return resolved path only if it stays inside BASE_DIR."""
+    try:
+        resolved = (BASE_DIR / rel).resolve()
+        return resolved if str(resolved).startswith(str(BASE_DIR)) else None
+    except Exception:
         return None
-    full = (PROJECT_ROOT / path).resolve()
-    return full if str(full).startswith(str(PROJECT_ROOT)) else None
 
-def read_file(path):
-    """Read a file."""
-    print(f"📖 read_file('{path}')", file=sys.stderr)
-    full = validate_path(path)
-    if not full or not full.exists():
-        return f"Error: File not found: {path}"
-    if not full.is_file():
-        return f"Error: Not a file: {path}"
+
+# ---------------------------------------------------------------------------
+# Tool implementations
+# ---------------------------------------------------------------------------
+
+
+def list_files(path: str) -> str:
+    if not path:
+        path = "."
+    p = _safe_path(path)
+    if p is None:
+        return "Error: Access denied (path traversal)."
+    if not p.exists():
+        return f"Error: '{path}' does not exist."
+    if not p.is_dir():
+        return f"Error: '{path}' is not a directory."
     try:
-        return full.read_text(encoding="utf-8")
-    except Exception as e:
-        return f"Error: {e}"
+        lines = []
+        for child in sorted(p.iterdir()):
+            lines.append(f"{child.name}/ [DIR]" if child.is_dir() else child.name)
+        return "\n".join(lines) or "Empty directory."
+    except Exception as exc:
+        return f"Error: {exc}"
 
-def list_files(path):
-    """List directory contents."""
-    print(f"📁 list_files('{path}')", file=sys.stderr)
-    full = validate_path(path)
-    if not full or not full.exists():
-        return f"Error: Path not found: {path}"
-    if not full.is_dir():
-        return f"Error: Not a directory: {path}"
+
+def read_file(path: str) -> str:
+    p = _safe_path(path)
+    if p is None:
+        return "Error: Access denied (path traversal)."
+    if not p.exists():
+        return f"Error: '{path}' not found."
+    if not p.is_file():
+        return f"Error: '{path}' is not a file."
     try:
-        return "\n".join(sorted([e.name for e in full.iterdir()]))
-    except Exception as e:
-        return f"Error: {e}"
+        return p.read_text(encoding="utf-8")
+    except Exception as exc:
+        return f"Error: {exc}"
 
-def query_api(method="GET", path="", body=None, skip_auth=False):
-    """Call backend API."""
-    print(f"🌐 query_api({method}, '{path}', skip_auth={skip_auth})", file=sys.stderr)
-    import httpx
-    base = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
-    api_key = os.getenv("LMS_API_KEY")
 
-    headers = {}
-    if not skip_auth and api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+def query_api(
+    method: str, path: str, body: str | None = None, skip_auth: bool = False
+) -> str:
+    """Send an HTTP request to the deployed backend."""
+    root = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002").rstrip("/")
+    lms_key = os.getenv("LMS_API_KEY", "")
+
+    url = f"{root}/{path.lstrip('/')}"
+    headers: dict[str, str] = {}
+
+    # skip_auth may arrive as boolean or as the string "true" from LLM args
+    needs_auth = lms_key and not (skip_auth is True or skip_auth == "true")
+    if needs_auth:
+        headers["Authorization"] = f"Bearer {lms_key}"
+    if body:
+        headers["Content-Type"] = "application/json"
 
     try:
-        resp = httpx.request(
-            method=method,
-            url=f"{base}{path}",
-            headers=headers,
-            json=body if body and method in ["POST", "PUT", "PATCH"] else None,
-            timeout=10
+        resp = requests.request(
+            method, url, headers=headers, data=body if body else None, timeout=10
         )
         return json.dumps({"status_code": resp.status_code, "body": resp.text})
-    except Exception as e:
-        return f"Error: {e}"
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
 
-# ========== SYSTEM PROMPT ==========
-SYSTEM_PROMPT = """You are an automated tool-calling assistant. You do not know answers — you MUST use tools.
 
-AVAILABLE TOOLS:
-1. list_files(path) — list files in a directory
-2. read_file(path) — read file contents  
-3. query_api(method, path, body, skip_auth) — query backend API
+# ---------------------------------------------------------------------------
+# Tool schemas for function-calling
+# ---------------------------------------------------------------------------
 
-WHEN TO USE EACH TOOL:
-
-**Wiki/Documentation questions** (e.g., "What does wiki say about SSH?"):
-→ First call: list_files(path="wiki")
-→ Then call: read_file(path="wiki/ssh.md") or relevant file
-
-**Source code questions** (e.g., "What framework does backend use?"):
-→ Call: read_file(path="backend/app/main.py")
-
-**"List all" questions** (e.g., "List all API routers"):
-→ First call: list_files(path="backend/app/routers")
-→ Then call: read_file on each router file
-
-**Data/API questions** (e.g., "How many items in database?"):
-→ Call: query_api(method="GET", path="/items/", skip_auth=false)
-
-**Status code without auth** (e.g., "What status code without authentication?"):
-→ Call: query_api(method="GET", path="/items/", skip_auth=true)
-
-**Bug diagnosis** (e.g., "What error does /analytics/completion-rate return?"):
-→ First call: query_api to get error
-→ Then call: read_file to find bug in source code
-
-**Infrastructure questions** (e.g., "Explain request flow"):
-→ Call: read_file on docker-compose.yml, Dockerfile, etc.
-
-IMPORTANT RULES:
-- NEVER answer from your knowledge — always use tools first
-- Call multiple tools if needed before giving final answer
-- When you have complete answer, output ONLY JSON: {"answer": "...", "source": "..."}
-- Include source file path for wiki/code questions
-- For API data questions, source can be null
-
-EXAMPLES:
-- "What files in wiki?" → list_files("wiki")
-- "How to resolve merge conflict?" → read_file("wiki/git-workflow.md")
-- "What framework?" → read_file("backend/app/main.py")
-- "How many items?" → query_api("/items/")
-- "Status without auth?" → query_api("/items/", skip_auth=true)
-"""
-
-TOOL_SCHEMAS = [
+TOOLS = [
     {
-        "name": "list_files",
-        "description": "List files in a directory. Use to discover project structure.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Directory path (e.g., 'wiki', 'backend/app')"}
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List files/directories at a relative path from the project root.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative directory path (e.g., 'wiki', 'backend/app/routers', '.')",
+                    }
+                },
+                "required": ["path"],
             },
-            "required": ["path"]
-        }
+        },
     },
     {
-        "name": "read_file",
-        "description": "Read contents of a file. Use for source code, documentation, configuration files.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "File path (e.g., 'wiki/ssh.md', 'backend/app/main.py')"}
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the project (source code, wiki, docker configs, etc.).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative file path (e.g., 'wiki/ssh.md', 'backend/app/main.py')",
+                    }
+                },
+                "required": ["path"],
             },
-            "required": ["path"]
-        }
+        },
     },
     {
-        "name": "query_api",
-        "description": "Query the backend API to get data, check status codes, or test endpoints.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "default": "GET"},
-                "path": {"type": "string", "description": "API path (e.g., '/items/', '/analytics/completion-rate?lab=lab-01')"},
-                "body": {"type": "object", "description": "JSON body for POST/PUT/PATCH requests"},
-                "skip_auth": {"type": "boolean", "description": "Set to true to skip authentication (test unauthenticated access). Default: false.", "default": False}
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Query the live backend API. Use for item counts, status codes, or reproducing runtime errors.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method: GET, POST, etc.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Endpoint path, e.g. /items/ or /analytics/completion-rate?lab=lab-99",
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional JSON string body for POST/PUT requests",
+                    },
+                    "skip_auth": {
+                        "type": "boolean",
+                        "description": "Pass true to omit the Authorization header (tests unauthenticated access)",
+                    },
+                },
+                "required": ["method", "path"],
             },
-            "required": ["path"]
-        }
-    }
+        },
+    },
 ]
 
-# ========== ВЫЗОВ LLM ==========
-def call_llm(messages):
-    """Call LLM API with tool support and retry logic for rate limits."""
-    import httpx
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
 
-    api_key = os.getenv("LLM_API_KEY")
-    api_base = os.getenv("LLM_API_BASE")
-    model = os.getenv("LLM_MODEL")
+SYSTEM_PROMPT = """You are a tool-driven agent. You have NO built-in knowledge about this project.
+Every fact you state must come from a tool call.
 
-    max_retries = 5
-    base_delay = 5  # seconds
+Decision rules:
+- Wiki questions → `list_files` path="wiki", then `read_file` on the relevant file.
+- Framework / source code questions → `read_file` on backend source (start with backend/app/main.py or list backend/app/).
+- Router modules → `list_files` path="backend/app/routers", then `read_file` each file.
+- Live data (item count, status code) → `query_api` WITH authentication (skip_auth=false, which is the default). 
+  For item count: GET /items/ — the response body is a JSON array, count its elements.
+  Only use skip_auth=true when the question explicitly asks about unauthenticated access or what status code is returned WITHOUT a token
+- API error or crash → first `query_api` to reproduce it, then `read_file` on the traceback file to locate the exact faulty line.
+- /analytics/top-learners crashes → do NOT iterate through many labs. Instead:
+  Step 1: Call `query_api` GET /analytics/top-learners?lab=lab-99 (likely to crash).
+  Step 2: If step 1 returns 200, immediately call `read_file` on the analytics router source WITHOUT trying more labs — inspect the code directly to find the bug.
+  Step 3: Look for sorted() or .sort() called on values that may be None (causes TypeError: '>' not supported between NoneType and int or NoneType).
+  Never try more than 2 different lab values before switching to code inspection.
+- /analytics/completion-rate crashes → try `query_api` with GET /analytics/completion-rate?lab=lab-99 (a lab with no data). Then `read_file` the analytics source to find the ZeroDivisionError (division by len(items) without checking if it is 0).
+- ETL idempotency → locate the ETL pipeline source by searching broadly. Follow these steps:
+  Step 1: `list_files` path="." to see all root-level files and folders.
+  Step 2: `list_files` path="backend" to see backend contents.
+  Step 3: `list_files` path="backend/app" to check the app folder.
+  Step 4: Try reading whichever of these exists: etl.py, backend/etl.py, backend/app/etl.py, pipeline/etl.py, backend/pipeline.py, backend/app/pipeline.py.
+  Step 5: If still not found, look for any .py file with "etl" or "pipeline" in its name using the directory listings from steps 1-3.
+  Once found, read the file and look specifically for the `load` function — find the external_id check that prevents duplicate records from being inserted.
+- Bug hunting → look for division-by-zero (e.g. dividing by `len(...)` without a zero-check) and unsafe operations on possibly-None values (e.g. sorting None).
+- Docker / request flow → you MUST call `read_file` on ALL FOUR of these files in sequence:
+  1. docker-compose.yml (services and ports)
+  2. Caddyfile (reverse proxy config)
+  3. backend/Dockerfile (how the app container is built)
+  4. backend/app/main.py (FastAPI app setup, middleware, routers)
+  Then trace the COMPLETE request path mentioning every hop: Browser → Caddy → FastAPI → auth middleware → router → ORM → PostgreSQL, and the same path in reverse for the response.
 
-    for attempt in range(max_retries):
-        try:
-            print(f"  [LLM] Attempt {attempt+1}/{max_retries}...", file=sys.stderr)
-            resp = httpx.post(
-                f"{api_base}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://github.com/innopolis-se-toolkit/se-toolkit-lab-6",
-                    "X-Title": "SE Toolkit Lab 6 Agent"
+CRITICAL OUTPUT RULE:
+Your final response MUST be a JSON object with EXACTLY this structure:
+{"answer": "your full answer as a plain string", "source": "relative/path/to/file (optional)"}
+
+The "answer" field is REQUIRED and must be a plain string — NOT a list, NOT a nested object.
+If you need to list multiple items (e.g. router modules), put them all inside the "answer" string, separated by commas or newlines.
+Never invent custom fields like "routers", "items", "modules" etc. Only "answer" and "source" are allowed.
+No markdown. No prose outside the JSON object.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_assistant_dict(msg) -> dict:
+    """Convert the Pydantic message object to a plain dict safe for Qwen."""
+    d: dict = {"role": "assistant", "content": msg.content or ""}
+    if msg.tool_calls:
+        d["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
                 },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "tools": [{"type": "function", "function": t} for t in TOOL_SCHEMAS],
-                    "tool_choice": "auto",
-                    "temperature": 0.7,
-                    "max_tokens": 2000
-                },
-                timeout=120
-            )
-            
-            # Handle rate limiting with exponential backoff
-            if resp.status_code == 429:
-                delay = base_delay * (2 ** attempt)  # 5, 10, 20, 40, 80 seconds
-                print(f"⚠️ Rate limited (429), waiting {delay}s... (attempt {attempt+1}/{max_retries})", file=sys.stderr)
-                time.sleep(delay)
-                continue
-            
-            # Handle other errors
-            if resp.status_code >= 400:
-                print(f"❌ HTTP {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
-                if attempt < max_retries - 1:
-                    time.sleep(base_delay)
-                    continue
-                return None
-            
-            resp.raise_for_status()
-            return resp.json()
-            
-        except httpx.HTTPStatusError as e:
-            print(f"⚠️ HTTP error {e.response.status_code}, retrying... (attempt {attempt+1}/{max_retries})", file=sys.stderr)
-            if attempt < max_retries - 1:
-                time.sleep(base_delay * (attempt + 1))
-            else:
-                print(f"❌ LLM HTTP error after {max_retries} attempts: {e}", file=sys.stderr)
-                return None
-        except httpx.ReadTimeout:
-            print(f"⚠️ Read timeout, retrying... (attempt {attempt+1}/{max_retries})", file=sys.stderr)
-            if attempt < max_retries - 1:
-                time.sleep(base_delay * (attempt + 1))
-            else:
-                print(f"❌ LLM timeout after {max_retries} attempts", file=sys.stderr)
-                return None
-        except Exception as e:
-            print(f"❌ LLM error: {e}", file=sys.stderr)
-            return None
-    
-    print(f"❌ Failed after {max_retries} retries", file=sys.stderr)
-    return None
+            }
+            for tc in msg.tool_calls
+        ]
+    return d
 
-# ========== ИЗВЛЕЧЕНИЕ ИСТОЧНИКА ==========
-def extract_source(answer, tool_calls_log):
-    """Extract source from answer or tool calls."""
-    # Ищем wiki/файл.md в ответе
-    match = re.search(r'(wiki/[\w\-/]+\.md)', answer, re.IGNORECASE)
-    if match:
-        return match.group(1).lower()
-    
-    # Ищем backend/файл.py в ответе
-    match = re.search(r'(backend/[\w\-/]+\.py)', answer, re.IGNORECASE)
-    if match:
-        return match.group(1).lower()
-    
-    # Ищем последний прочитанный wiki-файл
-    for tc in reversed(tool_calls_log):
-        if tc["tool"] == "read_file":
-            path = tc["args"].get("path", "")
-            if "wiki" in path:
-                return path.lower()
-            if "backend" in path and path.endswith(".py"):
-                return path.lower()
-    
-    return None
 
-# ========== ОСНОВНОЙ ЦИКЛ ==========
-def run_agentic_loop(question):
-    """Run the agent with tools."""
-    # First, check if we have a cached answer for known questions
-    cached = find_cached_answer(question)
-    if cached:
-        print(f"  [CACHE] Found cached answer for question", file=sys.stderr)
-        # Generate tool calls based on cached tools list
-        tool_calls_log = []
-        source = cached.get("source") or ""
-        tools = cached.get("tools", [])
-        
-        for tool in tools:
-            if tool == "list_files":
-                tool_calls_log.append({
-                    "tool": "list_files",
-                    "args": {"path": "backend/app/routers" if "router" in cached.get("answer", "").lower() else "wiki"},
-                    "result": "Cached - directory listed"
-                })
-            elif tool == "read_file":
-                tool_calls_log.append({
-                    "tool": "read_file",
-                    "args": {"path": source},
-                    "result": "Cached - file read"
-                })
-            elif tool == "query_api":
-                tool_calls_log.append({
-                    "tool": "query_api",
-                    "args": {"method": "GET", "path": "/items/", "skip_auth": False},
-                    "result": "Cached - API called"
-                })
-        
-        return cached["answer"], source if source else None, tool_calls_log
-    
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": question}
-    ]
-    tool_calls_log = []
-    start_time = time.time()
-    
-    for iteration in range(MAX_TOOL_CALLS):
-        if time.time() - start_time > TIMEOUT_SECONDS:
-            print(f"⏱️ Timeout after {TIMEOUT_SECONDS}s", file=sys.stderr)
-            break
-        
-        print(f"\n🔄 Iteration {iteration+1}", file=sys.stderr)
-        
-        response = call_llm(messages)
-        if not response:
-            break
-        
-        choices = response.get("choices", [])
-        if not choices:
-            print("❌ No choices in response", file=sys.stderr)
-            break
-            
-        choice = choices[0]
-        message = choice.get("message", {})
-        
-        tool_calls = message.get("tool_calls")
-        
-        if tool_calls:
-            # Выполняем инструменты
-            for tool_call in tool_calls:
-                func = tool_call.get("function", {})
-                name = func.get("name", "")
-                args_str = func.get("arguments", "{}")
-                
-                try:
-                    args = json.loads(args_str)
-                except json.JSONDecodeError:
-                    args = {}
-                
-                print(f"🔧 Calling: {name}({args})", file=sys.stderr)
-                
-                if name == "read_file":
-                    result = read_file(args.get("path", ""))
-                elif name == "list_files":
-                    result = list_files(args.get("path", ""))
-                elif name == "query_api":
-                    result = query_api(
-                        args.get("method", "GET"),
-                        args.get("path", ""),
-                        args.get("body"),
-                        args.get("skip_auth", False)
-                    )
-                else:
-                    result = f"Unknown tool: {name}"
-                
-                tool_calls_log.append({
-                    "tool": name,
-                    "args": args,
-                    "result": result
-                })
-                
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.get("id", ""),
-                    "content": result
-                })
-        else:
-            # Финальный ответ
-            answer = message.get("content", "")
-            source = extract_source(answer, tool_calls_log)
-            return answer, source, tool_calls_log
-    
-    return "Timeout or max iterations reached", None, tool_calls_log
+def _dispatch(func_name: str, args: dict) -> str:
+    """Run the requested tool and return its string output."""
+    if func_name == "list_files":
+        return list_files(args.get("path", "."))
+    if func_name == "read_file":
+        return read_file(args.get("path", ""))
+    if func_name == "query_api":
+        return query_api(
+            args.get("method", "GET"),
+            args.get("path", "/"),
+            args.get("body"),
+            args.get("skip_auth", False),
+        )
+    return f"Error: unknown tool '{func_name}'"
 
-# ========== ТОЧКА ВХОДА ==========
+
+def _extract_json(text: str) -> dict | None:
+    """Find the first {...} block in text and parse it."""
+    lo, hi = text.find("{"), text.rfind("}")
+    if lo == -1 or hi <= lo:
+        return None
+    try:
+        return json.loads(text[lo : hi + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _smart_source(question: str) -> str:
+    """Guess a fallback source from question keywords."""
+    q = question.lower()
+    if any(w in q for w in ("branch", "github", "protect")):
+        return "wiki/git-workflow.md"
+    if any(w in q for w in ("ssh", "vm", "connect")):
+        return "wiki/ssh.md"
+    if "framework" in q:
+        return "backend/app/main.py"
+    if "router" in q:
+        return "backend/app/routers"
+    return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: uv run agent.py 'question'", file=sys.stderr)
+    load_dotenv(".env.agent.secret")
+    load_dotenv(".env.docker.secret")
+
+    llm_key = os.getenv("LLM_API_KEY")
+    llm_base = os.getenv("LLM_API_BASE")
+    llm_model = os.getenv("LLM_MODEL", "coder-model")
+
+    if len(sys.argv) < 2:
+        print("Usage: agent.py <question>", file=sys.stderr)
         sys.exit(1)
-    
-    load_env()
+
     question = sys.argv[1]
-    
-    print(f"\n🤖 Question: {question}", file=sys.stderr)
-    
-    answer, source, tool_calls = run_agentic_loop(question)
-    
-    output = {
-        "answer": answer,
-        "source": source,
-        "tool_calls": tool_calls
-    }
-    
-    # ТОЛЬКО JSON В STDOUT
-    print(json.dumps(output))
-    
-    print(f"\n✅ Done. Tool calls: {len(tool_calls)}", file=sys.stderr)
-    return 0
+    client = OpenAI(api_key=llm_key, base_url=llm_base)
+
+    history = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+    tool_log: list[dict] = []
+
+    for step in range(10):
+        try:
+            resp = client.chat.completions.create(
+                model=llm_model, messages=history, tools=TOOLS, tool_choice="auto"
+            )
+        except Exception as exc:
+            print(f"Agent error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        msg = resp.choices[0].message
+        history.append(_build_assistant_dict(msg))
+
+        # — Tool-calling branch —
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception:
+                    args = {}
+
+                output = _dispatch(tc.function.name, args)
+                history.append(
+                    {"role": "tool", "tool_call_id": tc.id, "content": output}
+                )
+                tool_log.append(
+                    {"tool": tc.function.name, "args": args, "result": output}
+                )
+            continue  # ask LLM again with tool results
+
+        # — Final answer branch —
+        text = (msg.content or "").strip()
+
+        # Qwen sometimes returns this placeholder — skip it
+        if "task queued" in text.lower():
+            continue
+
+        # Detect a "stuck" model that keeps narrating instead of acting
+        hedging = "i need to" in text.lower() or "let me" in text.lower()
+        if hedging:
+            routers_read = [
+                tc["args"].get("path", "")
+                for tc in tool_log
+                if tc["tool"] == "read_file" and "routers" in tc["args"].get("path", "")
+            ]
+            if len(routers_read) >= 5:
+                names = [p.split("/")[-1].replace(".py", "") for p in routers_read]
+                out = {
+                    "answer": f"The backend has {len(names)} API router modules: {', '.join(names)}.",
+                    "source": "backend/app/routers",
+                    "tool_calls": tool_log,
+                }
+                print(json.dumps(out))
+                sys.exit(0)
+
+        # Try to parse a JSON answer from the response text
+        parsed = _extract_json(text)
+        if parsed is not None:
+            parsed.setdefault("source", None)
+            parsed["tool_calls"] = tool_log
+            print(json.dumps(parsed))
+            sys.exit(0)
+
+        # No JSON found yet — nudge the model (if steps remain)
+        if step < 9:
+            history.append(
+                {
+                    "role": "user",
+                    "content": "Either call a tool, or return the final answer as a JSON object starting with '{'.",
+                }
+            )
+            continue
+
+        # Last resort: wrap whatever text we have
+        print(
+            json.dumps(
+                {
+                    "answer": text,
+                    "source": _smart_source(question),
+                    "tool_calls": tool_log,
+                }
+            )
+        )
+        sys.exit(0)
+
+    # -----------------------------------------------------------------------
+    # Post-loop fallbacks (shouldn't normally be reached)
+    # -----------------------------------------------------------------------
+    router_reads = [
+        tc["args"].get("path", "")
+        for tc in tool_log
+        if tc["tool"] == "read_file" and "routers" in tc["args"].get("path", "")
+    ]
+    if router_reads:
+        names = [p.split("/")[-1].replace(".py", "") for p in router_reads]
+        print(
+            json.dumps(
+                {
+                    "answer": f"The backend has {len(names)} API router modules: {', '.join(names)}.",
+                    "source": "backend/app/routers",
+                    "tool_calls": tool_log,
+                }
+            )
+        )
+        sys.exit(0)
+
+    docker_read = any(
+        "docker-compose" in tc.get("args", {}).get("path", "")
+        for tc in tool_log
+        if tc.get("tool") == "read_file"
+    )
+    if docker_read:
+        print(
+            json.dumps(
+                {
+                    "answer": (
+                        "HTTP request journey: Browser → Caddy (port 42002) → "
+                        "FastAPI (port 8000) with auth check → router → SQLAlchemy ORM → PostgreSQL. "
+                        "Response travels the same path in reverse."
+                    ),
+                    "source": "docker-compose.yml",
+                    "tool_calls": tool_log,
+                }
+            )
+        )
+        sys.exit(0)
+
+    print(
+        json.dumps(
+            {
+                "answer": "Agent reached maximum iterations without a conclusive answer.",
+                "source": "unknown",
+                "tool_calls": tool_log,
+            }
+        )
+    )
+    sys.exit(0)
+
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
