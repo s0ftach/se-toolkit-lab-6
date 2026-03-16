@@ -91,12 +91,53 @@ def test_agent_uses_query_api_for_data_question():
 
     output = json.loads(result.stdout)
     tool_names = [call["tool"] for call in output["tool_calls"]]
-    
+
     # Agent should use query_api for data questions
     assert "query_api" in tool_names, f"Expected query_api for data question. Got: {tool_names}"
     assert "answer" in output, "Missing 'answer' field"
 
     print("✓ data question test passed!")
+
+
+def test_agent_uses_query_api_for_status_code_question():
+    """Test that agent uses query_api with skip_auth when asked about unauthenticated status codes."""
+    result = run_agent("What HTTP status code does the API return when you request /items/ without an authentication header?")
+
+    assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
+
+    output = json.loads(result.stdout)
+    tool_names = [call["tool"] for call in output["tool_calls"]]
+
+    # Agent should use query_api for status code questions
+    assert "query_api" in tool_names, f"Expected query_api for status code question. Got: {tool_names}"
+    assert "answer" in output, "Missing 'answer' field"
+    
+    # Check that the answer contains a status code (401 or 403)
+    answer = output["answer"].lower()
+    assert "401" in answer or "403" in answer, f"Expected status code 401 or 403 in answer. Got: {output['answer']}"
+
+    print("✓ status code question test passed!")
+
+
+def test_agent_chains_tools_for_error_diagnosis():
+    """Test that agent chains query_api and read_file for error diagnosis questions."""
+    result = run_agent("Query /analytics/completion-rate for a lab with no data (e.g., lab-99). What error do you get, and what is the bug in the source code?")
+
+    assert result.returncode == 0, f"Agent exited with code {result.returncode}: {result.stderr}"
+
+    output = json.loads(result.stdout)
+    tool_names = [call["tool"] for call in output["tool_calls"]]
+
+    # Agent should use both query_api (to reproduce error) and read_file (to find bug)
+    assert "query_api" in tool_names, f"Expected query_api for error diagnosis. Got: {tool_names}"
+    assert "read_file" in tool_names, f"Expected read_file for error diagnosis. Got: {tool_names}"
+    assert "answer" in output, "Missing 'answer' field"
+    
+    # Check that the answer mentions the error type
+    answer = output["answer"].lower()
+    assert "zero" in answer or "division" in answer, f"Expected mention of ZeroDivisionError. Got: {output['answer']}"
+
+    print("✓ error diagnosis test passed!")
 
 
 if __name__ == "__main__":
@@ -105,3 +146,5 @@ if __name__ == "__main__":
     test_agent_uses_read_file_for_git_question()
     test_agent_uses_read_file_for_framework_question()
     test_agent_uses_query_api_for_data_question()
+    test_agent_uses_query_api_for_status_code_question()
+    test_agent_chains_tools_for_error_diagnosis()
