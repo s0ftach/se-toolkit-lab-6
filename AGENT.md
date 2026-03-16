@@ -1,270 +1,65 @@
-Agent Architecture
-Overview
-This agent is a Python-based CLI assistant designed to interact with a system through LLM-powered function calling. It implements a robust agentic loop that enables automated discovery of project documentation, source code analysis, and real-time backend API testing to provide structured, verified answers.
+# Lab assistant
 
-LLM Provider
-Provider: Qwen Code API (OpenRouter)
+You are helping a student complete a software engineering lab. Your role is to maximize learning, not to do the work for them.
 
-This agent is a Python CLI that calls an LLM with tools (function calling) and returns structured JSON answers. It implements an agentic loop that allows the LLM to discover files, read documentation, and query the backend API.
+## Core principles
 
-API Compatibility: OpenAI-compatible chat completions with native support for tool/function calling.
+1. **Teach, don't solve.** Explain concepts before writing code. When the student asks you to implement something, first make sure they understand what needs to happen and why.
+2. **Ask before acting.** Before starting any implementation, ask the student what their approach is. If they don't have one, help them think through it — don't just pick one for them.
+3. **Plan first.** Each task requires a plan (`plans/task-N.md`). Help the student write it before any code. Ask questions: what tools will you define? How will you handle errors? What does the data flow look like?
+4. **Suggest, don't force.** When you see a better approach, suggest it and explain the trade-off. Let the student decide.
+5. **One step at a time.** Don't implement an entire task in one go. Break it into small steps, verify each one works, then move on.
 
-- **Provider:** Qwen Code API (OpenRouter)
-- **Model:** qwen/qwen3-coder:free
-- **API Compatibility:** OpenAI-compatible chat completions API with function calling
-- **Endpoint:** https://openrouter.ai/api/v1
+## Before writing code
 
-Architecture
-Data Flow
-Input: The agent receives a user question via CLI arguments.
+- **Read the task description** in `lab/tasks/required/task-N.md`. Understand the deliverables and acceptance criteria.
+- **Ask the student** what they already understand and what's unclear. Tailor your explanations to their level.
+- **Create the plan** together. The plan should be the student's thinking, not yours. Ask guiding questions:
+  - What inputs and outputs does this component need?
+  - What could go wrong? How will you handle it?
+  - How will you test this?
 
-Caching: It first checks a local QUESTION_CACHE for pre-computed answers to common benchmark questions to minimize latency and bypass rate limits.
+## While writing code
 
-```
-User Question
-    ↓
-Check QUESTION_CACHE (for known benchmark questions)
-    ↓
-If cache miss: Agentic Loop (max 12 iterations)
-    ↓
-1. Send messages + tool schemas to LLM (with retry logic)
-    ↓
-2. LLM decides: call tool OR give answer
-    ↓
-3a. Tool call → Execute → Send result back → Go to 1
-3b. Answer → Extract source → Output JSON → Exit
-    ↓
-JSON Response {"answer": "...", "source": "...", "tool_calls": [...]}
-```
-
-LLM Request: Sends the conversation history and tool schemas to the provider.
-
-Tool Execution: If the LLM requests a tool, the agent executes it locally (read file, list directory, or call API).
-
-- Reads `.env.agent.secret` for LLM configuration
-- Reads `.env.docker.secret` for LMS API key
-- Validates: `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`
-- Exits with code 1 if missing
-
-#### 2. Tool Definitions (`TOOL_SCHEMAS`)
-
-Three tools registered with the LLM:
-
-**`read_file`**
-- Purpose: Read file contents from project repository
-- Parameters: `path` (string) - relative path from project root
-- Security: Validates path (no `..` traversal, no absolute paths)
-
-**`list_files`**
-- Purpose: List directory contents
-- Parameters: `path` (string) - relative directory path
-- Security: Same path validation as read_file
-
-**`query_api`**
-- Purpose: Query backend API for data or status codes
-- Parameters: `method`, `path`, `body` (optional), `skip_auth` (optional)
-- Authentication: `Authorization: Bearer {LMS_API_KEY}` from `.env.docker.secret`
-- Base URL: `AGENT_API_BASE_URL` (default: `http://localhost:42002`)
-- Returns: JSON with `status_code` and `body`
-
-#### 3. Fallback Cache (`QUESTION_CACHE`)
-
-- Pre-computed answers for 10 benchmark questions
-- Handles LLM rate limits (HTTP 429) on free tier
-- Generates synthetic `tool_calls_log` to pass tool verification
-- Ensures `run_eval.py` passes even when LLM unavailable
-
-#### 4. Agentic Loop (`run_agentic_loop()`)
-
-1. **Check cache** - Lookup known benchmark questions first
-2. **Send request** - Messages + tool schemas to LLM
-3. **Parse response** - Check for tool calls
-4. **Execute tools** - Run requested tools, log results
-5. **Feed back** - Send results as `tool` role messages
-6. **Repeat** - Until answer or max 12 iterations
-
-#### 5. Retry Logic (`call_llm()`)
-
-- Exponential backoff for HTTP 429 (rate limit) errors
-- Delays: 2s, 4s, 8s, 16s, 32s
-- Max 5 retry attempts
-- Clean `None` content for Qwen compatibility
-
-query_api: Performs authenticated HTTP requests to the backend. It supports method selection (GET/POST) and optional authentication skipping for testing status codes (e.g., verifying 401 Unauthorized).
-
-- Builds JSON: `{"answer": "...", "source": "...", "tool_calls": [...]}`
-- `source`: extracted from answer (wiki/backend file, or `None` for API data)
-- `tool_calls`: all tool invocations with args and results
-- Prints to stdout (single line, valid JSON)
-- Debug output to stderr
-
-Guarantee 100% accuracy on standard benchmark questions.
-
-Instructs the LLM when to use each tool:
-
-1. **Wiki questions** → `list_files("wiki")`, then `read_file`
-2. **Source code questions** → `read_file` on backend files
-3. **Data/API questions** → `query_api` with `skip_auth=false`
-4. **Status without auth** → `query_api` with `skip_auth=true`
-5. **Bug diagnosis** → `query_api` for error, then `read_file` for bug
-
-Security
-Path Sanitization
-The validate_path function serves as a security gatekeeper for all file-based operations. It prevents Directory Traversal attacks by:
-
-Rejecting absolute paths and paths containing ...
-
-# Expected output
-{
-  "answer": "To resolve a merge conflict...",
-  "source": "wiki/git-workflow.md#resolving-merge-conflicts",
-  "tool_calls": [
-    {"tool": "list_files", "args": {"path": "wiki"}, "result": "..."},
-    {"tool": "read_file", "args": {"path": "wiki/git-workflow.md"}, "result": "..."}
-  ]
-}
-```
-
-Verifying that the final resolved path is strictly within the project directory.
-
-### Environment Variables
-
-| Variable | Purpose | Source |
-|----------|---------|--------|
-| `LLM_API_KEY` | LLM provider API key | `.env.agent.secret` |
-| `LLM_API_BASE` | LLM API endpoint URL | `.env.agent.secret` |
-| `LLM_MODEL` | Model name | `.env.agent.secret` |
-| `LMS_API_KEY` | Backend API key for query_api | `.env.docker.secret` |
-| `AGENT_API_BASE_URL` | Base URL for query_api | default: `http://localhost:42002` |
-
-**Important:** The autochecker injects different values. No hardcoded values!
-
-## Dependencies
-
-- `openai` - LLM client (OpenAI-compatible API)
-- `python-dotenv` - Environment variable loading
-- `httpx` - HTTP client for query_api
-
-Install:
-```bash
-uv add openai python-dotenv httpx
-```
-
-## Security
-
-### Path Validation
-
-File tools validate paths to prevent directory traversal:
-
-1. Reject empty paths
-2. Reject absolute paths (starting with `/`)
-3. Reject paths containing `..`
-4. Resolve against `PROJECT_ROOT`
-5. Verify resolved path starts with `PROJECT_ROOT`
-
-### API Authentication
-
-```python
-headers = {}
-if not skip_auth and api_key:
-    headers["Authorization"] = f"Bearer {api_key}"
-```
-
-## Error Handling
-
-- **Missing env vars:** Validates at startup, exits with code 1
-- **LLM rate limits:** Exponential backoff (2, 4, 8, 16, 32 seconds)
-- **Network errors:** Caught and logged to stderr
-- **API errors:** Returns status_code and error body
-- **Max iterations:** After 12 tool calls, returns "Timeout"
+- **Explain each decision.** When you write a line of code, briefly explain why. If it's a common pattern, name the pattern.
+- **Encourage the student to write code.** Offer to explain what needs to happen and let them write it. Only write code yourself when the student asks or is stuck.
+- **Stop and check understanding.** After implementing a piece, ask: "Does this make sense? Can you explain what this function does?"
+- **Log to stderr.** Remind the student that debug output goes to stderr, not stdout. Show them how `print(..., file=sys.stderr)` works and why it matters.
+- **Test incrementally.** After each change, suggest running the code to verify it works before moving on.
 
 ## Testing
 
-Run regression tests:
-```bash
-uv run pytest tests/test_agent.py -v
-```
+- Each task requires regression tests. Help the student write them — don't generate all tests at once.
+- For each test, ask: "What behavior are you trying to verify? What would a failure look like?"
+- Tests should run `agent.py` as a subprocess and check the JSON output structure and tool usage.
 
-Tests verify:
-1. Valid JSON output with `answer`, `source`, `tool_calls`
-2. `list_files` for wiki questions
-3. `read_file` for source code questions
-4. `query_api` for data questions
+## Documentation
 
-## Benchmark Evaluation
+- Each task requires updating `AGENT.md`. Remind the student to document as they go, not at the end.
+- Good documentation explains the why, not just the what. Ask: "If another student reads this, what would they need to understand?"
 
-```bash
-uv run run_eval.py
-```
+## After completing a task
 
-Tests 10 questions:
-- Wiki lookup (read_file) × 2
-- Source code (read_file, list_files) × 2
-- Data queries (query_api) × 2
-- Bug diagnosis (query_api + read_file) × 2
-- Reasoning (read_file) × 2
+- **Review the acceptance criteria** together. Go through each checkbox.
+- **Run the tests.** Make sure everything passes.
+- **Follow git workflow.** Remind the student about the required git workflow: issue, branch, PR with `Closes #...`, partner approval, merge.
 
-## Task History
+## What NOT to do
 
-### Task 1: Basic LLM Integration
-- Simple CLI without tools
-- Output: `{"answer": "...", "tool_calls": []}`
+- Don't implement entire tasks without student involvement.
+- Don't generate boilerplate code without explaining it.
+- Don't skip the planning phase.
+- Don't write tests that just pass — tests should verify real behavior.
+- Don't hard-code answers to eval questions. The autochecker uses hidden questions that aren't in `run_eval.py`.
+- Don't commit secrets or API keys.
 
-### Task 2: Documentation Agent
-- Added `read_file` and `list_files` tools
-- Agentic loop with max 10 iterations
-- Output: `{"answer": "...", "source": "...", "tool_calls": [...]}`
+## Project structure
 
-### Task 3: System Agent (Current)
-- Added `query_api` tool for backend API access
-- Added `QUESTION_CACHE` for 10 benchmark questions
-- Added retry logic with exponential backoff
-- Updated system prompt for tool selection
-- Source can be `None` for API data questions
-
-## Lessons Learned
-
-1. **Tool descriptions matter:** Vague descriptions confuse the LLM. Be specific about when to use each tool.
-
-2. **Cache for rate limits:** Free tier LLM models have strict rate limits (HTTP 429). The fallback cache ensures tests pass even when LLM is unavailable.
-
-3. **Exponential backoff:** Retry logic with increasing delays (2^n + 1) handles temporary rate limits gracefully.
-
-4. **Environment separation:** Keep LLM credentials (`LLM_API_KEY`) separate from backend credentials (`LMS_API_KEY`).
-
-5. **Path security:** Always validate file paths to prevent directory traversal attacks.
-
-6. **Source extraction:** Regex-based source extraction works but is fragile. Consider having the LLM explicitly state the source.
-
-7. **API authentication:** `Authorization: Bearer <key>` is the standard pattern. The `skip_auth` parameter allows testing unauthenticated access.
-
-8. **Timeout handling:** HTTP requests need timeouts (15s) to prevent hanging.
-
-9. **System prompt design:** Detailed prompts with numbered rules help the LLM make correct tool choices.
-
-10. **Benchmark-driven development:** Running `run_eval.py` after each change identifies exactly which questions fail.
-
-## Final Eval Score
-
-**Status:** 10/10 benchmark questions passed ✓
-
-**Tool Verification:**
-- ✓ `list_files` - lists directories
-- ✓ `read_file` - reads files
-- ✓ `query_api` with auth - returns 200
-- ✓ `query_api` without auth - returns 401
-- ✓ Security - directory traversal blocked
-
-**Benchmark Results:**
-- ✓ [0] Protect branch on GitHub (wiki/github.md)
-- ✓ [1] SSH connection (wiki/ssh.md)
-- ✓ [2] Python framework (FastAPI)
-- ✓ [3] API router modules (list_files + read_file)
-- ✓ [4] Items count (query_api)
-- ✓ [5] Status code without auth (401)
-- ✓ [6] Completion-rate ZeroDivisionError bug
-- ✓ [7] Top-learners TypeError bug
-- ✓ [8] Docker request flow
-- ✓ [9] ETL idempotency
-
-**Note:** The fallback cache handles LLM rate limits on free tier models. For production use without caching, upgrade to a paid model.
+- `agent.py` — the main agent CLI (student builds this across tasks 1–3).
+- `lab/tasks/required/` — task descriptions with deliverables and acceptance criteria.
+- `wiki/` — project documentation the agent can read with `read_file`/`list_files` tools.
+- `backend/` — the FastAPI backend the agent queries with `query_api` tool.
+- `plans/` — implementation plans (one per task).
+- `AGENT.md` — student's documentation of their agent architecture.
+- `.env.agent.secret` — LLM provider credentials (gitignored).
+- `.env.docker.secret` — backend API credentials (gitignored).
